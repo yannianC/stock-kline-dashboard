@@ -668,12 +668,13 @@ function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSa
       </thead>
       <tbody>
         {items.map((item) => (
-          <tr key={item.id} className="table-row" onClick={() => onOpenDetail(item.id)}>
+          <tr key={item.id} className="table-row">
             {STOCK_TABLE_COLUMNS.map((column) => (
               <td key={column.key} className={getStockTableCellClass(column)}>
                 {renderStockTableCell({
                   item: chartMap[item.tickerSymbol] ? { ...item, financialCharts: chartMap[item.tickerSymbol] } : item,
                   column,
+                  onOpenDetail,
                   onOpenCompare,
                   onCellSaved,
                   chartLoading: pendingChartCodes.has(item.tickerSymbol)
@@ -687,7 +688,7 @@ function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSa
   );
 }
 
-function renderStockTableCell({ item, column, onOpenCompare, onCellSaved, chartLoading = false }) {
+function renderStockTableCell({ item, column, onOpenDetail, onOpenCompare, onCellSaved, chartLoading = false }) {
   if (column.key === 'compare') {
     return (
       <button
@@ -705,7 +706,16 @@ function renderStockTableCell({ item, column, onOpenCompare, onCellSaved, chartL
   if (column.key === 'tickerName') {
     return (
       <div className="stock-name-cell">
-        <strong>{item.tickerName || item.name}</strong>
+        <button
+          className="stock-name-link"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenDetail(item.id);
+          }}
+        >
+          {item.tickerName || item.name}
+        </button>
         <span>{item.marketLabel}</span>
       </div>
     );
@@ -777,13 +787,20 @@ function StockFinancialChartCell({ title, rows, tone, fallbackValue, loading = f
 }
 
 function StockFinancialMiniChart({ title, rows, mode, tone }) {
+  const [hovered, setHovered] = useState(null);
+  const clipIdRef = useRef(`stock-financial-clip-${Math.random().toString(36).slice(2)}`);
   const width = 330;
-  const height = 158;
-  const padding = { top: 10, right: 38, bottom: 24, left: 48 };
+  const height = 164;
+  const padding = { top: 12, right: 38, bottom: 28, left: 48 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const amountValues = mode.key === 'total'
-    ? rows.map((row) => Math.max(0, toFiniteNumber(row.total) || 0))
+    ? rows.flatMap((row) => {
+      const quarterValues = STOCK_FINANCIAL_STACK_KEYS.map((key) => toFiniteNumber(row[key]) || 0);
+      const positiveSum = quarterValues.filter((value) => value > 0).reduce((total, value) => total + value, 0);
+      const negativeSum = quarterValues.filter((value) => value < 0).reduce((total, value) => total + value, 0);
+      return [positiveSum, negativeSum, toFiniteNumber(row.total) || 0];
+    })
     : rows.map((row) => toFiniteNumber(row[mode.valueKey]) || 0);
   const growthValues = rows.map((row) => toFiniteNumber(row[mode.growthKey])).filter(Number.isFinite);
   const minAmount = mode.key === 'total' ? 0 : Math.min(0, ...amountValues);
@@ -795,7 +812,11 @@ function StockFinancialMiniChart({ title, rows, mode, tone }) {
   const xForIndex = (index) => padding.left + groupStep * index + groupStep / 2;
   const amountY = (value) => padding.top + ((maxAmount - value) / amountRange) * chartHeight;
   const zeroY = amountY(0);
-  const growthY = (value) => padding.top + chartHeight / 2 - ((value * 100) / maxGrowthAbs) * (chartHeight / 2);
+  const growthY = (value) => clampNumber(
+    padding.top + chartHeight / 2 - ((value * 100) / maxGrowthAbs) * (chartHeight / 2),
+    padding.top + 3,
+    padding.top + chartHeight - 3
+  );
   const linePoints = rows
     .map((row, index) => {
       const value = toFiniteNumber(row[mode.growthKey]);
@@ -805,83 +826,155 @@ function StockFinancialMiniChart({ title, rows, mode, tone }) {
     .join(' ');
   const amountTicks = minAmount < 0 ? [maxAmount, 0, minAmount] : [maxAmount, maxAmount / 2, 0];
   const growthTicks = [maxGrowthAbs, 0, -maxGrowthAbs];
+  const clipId = clipIdRef.current;
 
   return (
-    <svg className="stock-financial-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}${mode.label}柱状图`}>
-      <rect x={padding.left} y={padding.top} width={chartWidth} height={chartHeight} fill="#f8faf7" />
-      {amountTicks.map((tick) => {
-        const y = amountY(tick);
-        return (
-          <g key={`amount-${tick}`}>
-            <line x1={padding.left} x2={padding.left + chartWidth} y1={y} y2={y} stroke="#dce4ee" strokeWidth="1" />
-            <text x={padding.left - 8} y={y + 4} textAnchor="end">{formatCompactAmountTick(tick)}</text>
-          </g>
-        );
-      })}
-      {growthTicks.map((tick) => (
-        <text key={`growth-${tick}`} x={padding.left + chartWidth + 12} y={growthY(tick / 100) + 4}>{formatGrowthTick(tick)}</text>
-      ))}
-      {rows.map((row, index) => {
-        const x = xForIndex(index) - barWidth / 2;
-        if (mode.key !== 'total') {
-          const value = toFiniteNumber(row[mode.valueKey]) || 0;
-          const y = value >= 0 ? amountY(value) : zeroY;
-          const barHeight = Math.max(1, Math.abs(zeroY - amountY(value)));
+    <div className="stock-financial-chart-wrap" onMouseLeave={() => setHovered(null)}>
+      <svg className="stock-financial-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}${mode.label}柱状图`}>
+        <defs>
+          <clipPath id={clipId}>
+            <rect x={padding.left} y={padding.top} width={chartWidth} height={chartHeight} />
+          </clipPath>
+        </defs>
+        <rect x={padding.left} y={padding.top} width={chartWidth} height={chartHeight} fill="#f8faf7" />
+        {amountTicks.map((tick) => {
+          const y = amountY(tick);
           return (
-            <rect
-              key={row.year}
-              x={x}
-              y={y}
-              width={barWidth}
-              height={barHeight}
-              rx="1"
-              fill={value < 0 ? '#ef4444' : STOCK_FINANCIAL_SINGLE_COLORS[mode.key] || (tone === 'profit' ? '#8b8ce8' : '#50b6a8')}
-            >
-              <title>{`${row.year} ${mode.label}: ${formatAmountWithYi(value)}，同比 ${formatDecimalPercent(row[mode.growthKey])}`}</title>
-            </rect>
+            <g key={`amount-${tick}`}>
+              <line x1={padding.left} x2={padding.left + chartWidth} y1={y} y2={y} stroke="#dce4ee" strokeWidth="1" />
+              <text x={padding.left - 8} y={y + 4} textAnchor="end">{formatCompactAmountTick(tick)}</text>
+            </g>
           );
-        }
-
-        let cursorY = zeroY;
-        return (
-          <g key={row.year}>
-            {STOCK_FINANCIAL_STACK_KEYS.map((key, stackIndex) => {
-              const value = Math.max(0, toFiniteNumber(row[key]) || 0);
-              const barHeight = Math.max(value > 0 ? 1 : 0, (value / amountRange) * chartHeight);
-              cursorY -= barHeight;
+        })}
+        {growthTicks.map((tick) => (
+          <text key={`growth-${tick}`} x={padding.left + chartWidth + 12} y={growthY(tick / 100) + 4}>{formatGrowthTick(tick)}</text>
+        ))}
+        <g clipPath={`url(#${clipId})`}>
+          {rows.map((row, index) => {
+            const x = xForIndex(index) - barWidth / 2;
+            if (mode.key !== 'total') {
+              const value = toFiniteNumber(row[mode.valueKey]) || 0;
+              const y = value >= 0 ? amountY(value) : zeroY;
+              const barHeight = Math.max(1, Math.abs(zeroY - amountY(value)));
               return (
                 <rect
-                  key={key}
+                  key={row.year}
+                  className="stock-financial-hit"
                   x={x}
-                  y={cursorY}
+                  y={y}
                   width={barWidth}
                   height={barHeight}
-                  fill={STOCK_FINANCIAL_STACK_COLORS[stackIndex]}
-                >
-                  <title>{`${row.year} ${key.toUpperCase()}: ${formatAmountWithYi(value)}`}</title>
-                </rect>
+                  rx="1"
+                  fill={value < 0 ? '#ef4444' : STOCK_FINANCIAL_SINGLE_COLORS[mode.key] || (tone === 'profit' ? '#8b8ce8' : '#50b6a8')}
+                  onMouseEnter={() => setHovered(buildFinancialHoverInfo({ row, mode, title, x: xForIndex(index), y, value }))}
+                  onMouseMove={() => setHovered(buildFinancialHoverInfo({ row, mode, title, x: xForIndex(index), y, value }))}
+                />
               );
-            })}
-          </g>
-        );
-      })}
-      {linePoints ? <polyline points={linePoints} fill="none" stroke="#e6e866" strokeWidth="2" /> : null}
-      {rows.map((row, index) => {
-        const value = toFiniteNumber(row[mode.growthKey]);
-        if (!Number.isFinite(value)) return null;
-        return (
-          <circle key={`point-${row.year}`} cx={xForIndex(index)} cy={growthY(value)} r="2.6" fill="#f6f09a" stroke="#5475cb" strokeWidth="1.5">
-            <title>{`${row.year} 同比: ${formatDecimalPercent(value)}`}</title>
-          </circle>
-        );
-      })}
-      {rows.map((row, index) => (
-        index % Math.ceil(rows.length / 5) === 0 || index === rows.length - 1
-          ? <text key={`year-${row.year}`} x={xForIndex(index)} y={height - 7} textAnchor="middle">{row.year}</text>
-          : null
-      ))}
-    </svg>
+            }
+
+            let positiveCursorY = zeroY;
+            let negativeCursorY = zeroY;
+            return (
+              <g key={row.year}>
+                {STOCK_FINANCIAL_STACK_KEYS.map((key, stackIndex) => {
+                  const value = toFiniteNumber(row[key]) || 0;
+                  const barHeight = Math.max(value !== 0 ? 1 : 0, (Math.abs(value) / amountRange) * chartHeight);
+                  const y = value >= 0 ? positiveCursorY - barHeight : negativeCursorY;
+                  if (value >= 0) {
+                    positiveCursorY -= barHeight;
+                  } else {
+                    negativeCursorY += barHeight;
+                  }
+                  return (
+                    <rect
+                      key={key}
+                      className="stock-financial-hit"
+                      x={x}
+                      y={y}
+                      width={barWidth}
+                      height={barHeight}
+                      fill={value < 0 ? '#ef4444' : STOCK_FINANCIAL_STACK_COLORS[stackIndex]}
+                      onMouseEnter={() => setHovered(buildFinancialHoverInfo({ row, mode, title, quarterKey: key, x: xForIndex(index), y, value }))}
+                      onMouseMove={() => setHovered(buildFinancialHoverInfo({ row, mode, title, quarterKey: key, x: xForIndex(index), y, value }))}
+                    />
+                  );
+                })}
+              </g>
+            );
+          })}
+          {linePoints ? <polyline points={linePoints} fill="none" stroke="#e6e866" strokeWidth="2" pointerEvents="none" /> : null}
+          {rows.map((row, index) => {
+            const value = toFiniteNumber(row[mode.growthKey]);
+            if (!Number.isFinite(value)) return null;
+            return (
+              <circle
+                key={`point-${row.year}`}
+                className="stock-financial-hit"
+                cx={xForIndex(index)}
+                cy={growthY(value)}
+                r="3"
+                fill="#f6f09a"
+                stroke="#5475cb"
+                strokeWidth="1.5"
+                onMouseEnter={() => setHovered(buildFinancialHoverInfo({ row, mode, title, x: xForIndex(index), y: growthY(value), growthOnly: true }))}
+                onMouseMove={() => setHovered(buildFinancialHoverInfo({ row, mode, title, x: xForIndex(index), y: growthY(value), growthOnly: true }))}
+              />
+            );
+          })}
+        </g>
+        {rows.map((row, index) => (
+          index % Math.ceil(rows.length / 5) === 0 || index === rows.length - 1
+            ? <text key={`year-${row.year}`} x={xForIndex(index)} y={height - 9} textAnchor="middle">{row.year}</text>
+            : null
+        ))}
+      </svg>
+      {hovered ? <StockFinancialTooltip info={hovered} /> : null}
+    </div>
   );
+}
+
+function buildFinancialHoverInfo({ row, mode, title, quarterKey, x, y, value, growthOnly = false }) {
+  const label = quarterKey ? getFinancialQuarterLabel(quarterKey) : mode.label;
+  const amount = growthOnly ? toFiniteNumber(row[mode.valueKey]) : value;
+  return {
+    x,
+    y,
+    title,
+    year: row.year,
+    label,
+    amount,
+    growth: row[quarterKey ? `${quarterKey}Gr` : mode.growthKey],
+    total: row.total,
+    q1: row.q1,
+    q2: row.q2,
+    q3: row.q3,
+    q4: row.q4
+  };
+}
+
+function StockFinancialTooltip({ info }) {
+  const left = clampNumber(info.x > 190 ? info.x - 162 : info.x + 12, 10, 170);
+  const top = clampNumber(info.y > 92 ? info.y - 80 : info.y + 10, 8, 70);
+
+  return (
+    <div className="stock-financial-tooltip" style={{ left, top }}>
+      <strong>{info.title} · {info.year} · {info.label}</strong>
+      <span>金额: {formatAmountWithYi(info.amount)}</span>
+      <span>同比: {formatDecimalPercent(info.growth)}</span>
+      <span>全年: {formatAmountWithYi(info.total)}</span>
+      <small>
+        Q1 {formatAmountWithYi(info.q1)} / Q2 {formatAmountWithYi(info.q2)} / Q3 {formatAmountWithYi(info.q3)} / Q4 {formatAmountWithYi(info.q4)}
+      </small>
+    </div>
+  );
+}
+
+function getFinancialQuarterLabel(key) {
+  if (key === 'q1') return '一季报';
+  if (key === 'q2') return '二季报';
+  if (key === 'q3') return '三季报';
+  if (key === 'q4') return '四季报';
+  return key;
 }
 
 function formatCompactAmountTick(value) {
@@ -4891,6 +4984,12 @@ function formatSlashDateTime(date) {
 function toFiniteNumber(value) {
   const number = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(number) ? number : NaN;
+}
+
+function clampNumber(value, min, max) {
+  const number = toFiniteNumber(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.min(max, Math.max(min, number));
 }
 
 function formatPriceValue(value, instrumentType) {

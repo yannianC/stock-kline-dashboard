@@ -816,6 +816,7 @@ button {
 }
 
 .stock-financial-cell {
+  position: relative;
   display: grid;
   gap: 8px;
   min-width: 336px;
@@ -863,18 +864,56 @@ button {
   background: #fffafa;
 }
 
+.stock-financial-chart-wrap {
+  position: relative;
+  width: 330px;
+  height: 164px;
+}
+
 .stock-financial-chart {
   width: 330px;
-  height: 158px;
+  height: 164px;
   display: block;
   color: #68717a;
   font-size: 10px;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .stock-financial-chart text {
   fill: currentColor;
   font-variant-numeric: tabular-nums;
+}
+
+.stock-financial-hit {
+  cursor: crosshair;
+}
+
+.stock-financial-tooltip {
+  position: absolute;
+  z-index: 4;
+  width: 150px;
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  border: 1px solid rgba(40, 50, 58, 0.16);
+  border-radius: 7px;
+  color: #26343b;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 24px rgba(34, 45, 52, 0.16);
+  font-size: 11px;
+  line-height: 1.25;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-financial-tooltip strong {
+  color: #1f2d35;
+  font-size: 11px;
+}
+
+.stock-financial-tooltip small {
+  color: #667277;
+  font-size: 10px;
 }
 
 .table-sort-button {
@@ -898,7 +937,7 @@ button {
 }
 
 .table-row {
-  cursor: pointer;
+  cursor: default;
 }
 
 .table-row:hover {
@@ -960,6 +999,23 @@ button {
 .stock-name-cell {
   display: grid;
   gap: 3px;
+}
+
+.stock-name-link {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  color: #20303a;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stock-name-link:hover {
+  color: #0f766e;
+  text-decoration: underline;
 }
 
 .stock-name-cell strong {
