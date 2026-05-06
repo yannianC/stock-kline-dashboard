@@ -751,6 +751,11 @@ button {
   table-layout: fixed;
 }
 
+.stock-data-table {
+  min-width: 2520px;
+  table-layout: auto;
+}
+
 .market-table thead {
   position: sticky;
   top: 0;
@@ -772,6 +777,56 @@ button {
 .market-table th {
   color: #657174;
   font-weight: 600;
+}
+
+.stock-data-table th,
+.stock-data-table td {
+  padding: 9px 10px;
+  vertical-align: middle;
+}
+
+.stock-data-table th {
+  background: #f0f4eb;
+}
+
+.stock-data-table th span {
+  display: block;
+  line-height: 1.2;
+}
+
+.stock-data-table td.is-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-data-table td.is-compact {
+  width: 92px;
+  color: #536066;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-data-table td.is-wide {
+  min-width: 220px;
+}
+
+.table-sort-button {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.table-sort-button b {
+  min-width: 12px;
+  color: #147164;
+  font-size: 13px;
 }
 
 .table-row {
@@ -827,6 +882,90 @@ button {
 .compare-inline-button:hover {
   border-color: #8fb5b0;
   color: #0c4f47;
+}
+
+.compare-inline-button.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.stock-name-cell {
+  display: grid;
+  gap: 3px;
+}
+
+.stock-name-cell strong {
+  color: #20303a;
+  font-size: 13px;
+}
+
+.stock-name-cell span {
+  color: #7b8587;
+  font-size: 11px;
+}
+
+.stock-edit-input {
+  width: 74px;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid #cbd3c2;
+  border-radius: 7px;
+  color: #1f2933;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.stock-edit-input.is-wide {
+  width: 210px;
+}
+
+.stock-edit-input:focus {
+  outline: 2px solid rgba(20, 113, 100, 0.16);
+  border-color: #147164;
+}
+
+.stock-filter-panel-rich {
+  gap: 12px;
+}
+
+.stock-filter-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: #566266;
+  font-size: 13px;
+}
+
+.stock-filter-toolbar strong {
+  color: #203039;
+  font-size: 15px;
+}
+
+.stock-filter-toolbar b {
+  color: #147164;
+}
+
+.stock-filter-builder {
+  display: grid;
+  gap: 8px;
+}
+
+.stock-filter-rule {
+  display: grid;
+  grid-template-columns: minmax(130px, 180px) 88px minmax(120px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.stock-filter-rule select,
+.stock-filter-rule input {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd3c2;
+  border-radius: 8px;
+  color: #24313a;
+  background: #ffffff;
 }
 
 .pager {

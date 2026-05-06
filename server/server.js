@@ -26,6 +26,7 @@ const STOCK_Q1_RANGE_START = '000001';
 const STOCK_Q1_RANGE_END = '002902';
 const CATALOG_DISK_CACHE_PATH = new URL('./catalog-cache.json', import.meta.url);
 const STOCK_Q1_DISK_CACHE_PATH = new URL('./stock-q1-cache.json', import.meta.url);
+const STOCK_TABLE_OVERRIDES_PATH = new URL('./stock-table-overrides.json', import.meta.url);
 const RESPONSE_DISK_CACHE_DIR_PATH = new URL('./response-cache/', import.meta.url);
 const TQSDK_BRIDGE_PATH = fileURLToPath(new URL('./tqsdk_bridge.py', import.meta.url));
 const QUOTE_BATCH_SIZE = 20;
@@ -238,6 +239,94 @@ app.get('/api/instruments', async (req, res) => {
     res.status(502).json({
       message: error.message || '品种列表获取失败',
       detail: error.stack
+    });
+  }
+});
+
+app.get('/api/stock-table', async (req, res) => {
+  try {
+    const page = clampNumber(Number(req.query.page || 1), 1, 10_000);
+    const pageSize = clampNumber(Number(req.query.pageSize || 80), 10, 300);
+    const search = String(req.query.search || '').trim();
+    const sortField = String(req.query.sortField || 'tickerSymbol').trim();
+    const sortDirection = String(req.query.sortDirection || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const filters = parseStockTableFilters(req.query.filters);
+    const catalog = await getCatalog();
+    const q1Snapshot = await getStockQ1Snapshot({ catalog }).catch(() => null);
+    const dailyBasicSnapshot = await getTushareDailyBasicSnapshot().catch(() => null);
+    const overrides = readStockTableOverrides();
+    const rows = buildStockTableRows({
+      catalog,
+      q1Snapshot,
+      dailyBasicSnapshot,
+      overrides
+    });
+
+    let filtered = filterStockTableRows(rows, { search, filters });
+    filtered = sortStockTableRows(filtered, sortField, sortDirection);
+
+    const start = (page - 1) * pageSize;
+    const items = filtered.slice(start, start + pageSize);
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      page,
+      pageSize,
+      total: filtered.length,
+      type: 'STOCK',
+      listTypes: LIST_TYPES,
+      filters: {
+        stockTable: filters,
+        q1Snapshot: buildQ1SnapshotMeta(q1Snapshot)
+      },
+      sort: {
+        field: sortField,
+        direction: sortDirection
+      },
+      items
+    });
+  } catch (error) {
+    res.status(502).json({
+      message: error.message || '股票增强列表获取失败',
+      detail: error.stack
+    });
+  }
+});
+
+app.post('/api/stock-table/edit', (req, res) => {
+  try {
+    const id = String(req.body?.id || '').trim();
+    const code = String(req.body?.code || '').trim();
+    const field = String(req.body?.field || '').trim();
+    const value = req.body?.value;
+
+    if (!id && !code) {
+      return res.status(400).json({ message: '缺少股票 id 或 code' });
+    }
+    if (!STOCK_TABLE_EDITABLE_FIELDS.has(field)) {
+      return res.status(400).json({ message: `不支持保存字段：${field || '--'}` });
+    }
+
+    const key = id || `STOCK:${code}`;
+    const overrides = readStockTableOverrides();
+    const current = overrides[key] || {};
+    const normalizedValue = normalizeStockTableEditValue(field, value);
+    overrides[key] = {
+      ...current,
+      id,
+      code,
+      [field]: normalizedValue,
+      updatedAt: new Date().toISOString()
+    };
+    persistStockTableOverrides(overrides);
+
+    res.json({
+      ok: true,
+      item: overrides[key]
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: error.message || '保存股票表格字段失败'
     });
   }
 });
@@ -5460,6 +5549,255 @@ function readStockQ1CacheFromDisk() {
   }
 }
 
+const STOCK_TABLE_EDITABLE_FIELDS = new Set([
+  'performanceGrowthScore',
+  'overallScore',
+  'liudaScore',
+  'targetPrice1',
+  'targetPrice2',
+  'note1',
+  'note2'
+]);
+
+const STOCK_TABLE_NUMERIC_FIELDS = new Set([
+  'performanceGrowthScore',
+  'overallScore',
+  'liudaScore',
+  'marketCap',
+  'stockPrice',
+  'grossRevenue',
+  'netProfit',
+  'peRatioTtm',
+  'pbRatio',
+  'dividendYield2026',
+  'dividendYield2025',
+  'forecastRevenueGrowthRate',
+  'forecastProfitGrowthRate',
+  'forecastPe3Years',
+  'annualPriceChange',
+  'revGrowthRateNew',
+  'profitGrowthRateNew',
+  'peForecastNew'
+]);
+
+const STOCK_TABLE_PERCENT_FIELDS = new Set([
+  'dividendYield2026',
+  'dividendYield2025',
+  'forecastRevenueGrowthRate',
+  'forecastProfitGrowthRate',
+  'annualPriceChange',
+  'revGrowthRateNew',
+  'profitGrowthRateNew'
+]);
+
+function parseStockTableFilters(value) {
+  if (!value) return [];
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((filter) => ({
+        field: String(filter?.field || '').trim(),
+        op: normalizeStockFilterOperator(filter?.op),
+        value: filter?.value == null ? '' : String(filter.value).trim()
+      }))
+      .filter((filter) => filter.field && filter.value !== '');
+  } catch (_error) {
+    return [];
+  }
+}
+
+function normalizeStockFilterOperator(value) {
+  if (['eq', 'gt', 'gte', 'lt', 'lte', 'contains'].includes(value)) return value;
+  return 'contains';
+}
+
+function readStockTableOverrides() {
+  try {
+    if (!fs.existsSync(STOCK_TABLE_OVERRIDES_PATH)) return {};
+    const text = fs.readFileSync(STOCK_TABLE_OVERRIDES_PATH, 'utf8');
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.warn('[stock-table] read overrides failed', error?.message || error);
+    return {};
+  }
+}
+
+function persistStockTableOverrides(overrides) {
+  fs.writeFileSync(STOCK_TABLE_OVERRIDES_PATH, JSON.stringify(overrides || {}, null, 2), 'utf8');
+}
+
+function normalizeStockTableEditValue(field, value) {
+  if (['note1', 'note2', 'targetPrice1', 'targetPrice2'].includes(field)) {
+    return value == null ? '' : String(value);
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function buildStockTableRows({ catalog, q1Snapshot, dailyBasicSnapshot, overrides }) {
+  return (catalog || [])
+    .filter((item) => item.type === 'STOCK')
+    .map((instrument) => buildStockTableRow(instrument, {
+      q1Row: q1Snapshot?.items?.[instrument.code] || null,
+      dailyBasicRow: getDailyBasicRowForInstrument(dailyBasicSnapshot, instrument),
+      override: getStockTableOverride(overrides, instrument)
+    }))
+    .filter(Boolean);
+}
+
+function buildStockTableRow(instrument, { q1Row, dailyBasicRow, override }) {
+  const peRatioTtm = firstFiniteNumber(q1Row?.peTtm, dailyBasicRow?.peTtm);
+  const stockPrice = firstFiniteNumber(q1Row?.price, dailyBasicRow?.close);
+  const marketCap = firstFiniteNumber(q1Row?.marketValue, dailyBasicRow?.totalMarketValue);
+  const forecastRevenueGrowthRate = firstFiniteNumber(q1Row?.revenueGrowthRate);
+  const forecastProfitGrowthRate = firstFiniteNumber(q1Row?.profitGrowthRate);
+  const forecastPe3Years = calculateStockTableForecastPe(peRatioTtm, forecastRevenueGrowthRate, forecastProfitGrowthRate);
+
+  return {
+    ...instrument,
+    tickerSymbol: instrument.code,
+    tickerName: instrument.name,
+    industryCategory: instrument.industryCategory || instrument.industry || '',
+    performanceGrowthScore: toNullableNumber(override?.performanceGrowthScore),
+    overallScore: toNullableNumber(override?.overallScore),
+    liudaScore: toNullableNumber(override?.liudaScore),
+    marketCap: roundMetricValue(marketCap),
+    stockPrice: roundMetricValue(stockPrice),
+    grossRevenue: roundMetricValue(q1Row?.revenue),
+    netProfit: roundMetricValue(q1Row?.profit),
+    peRatioTtm: roundMetricValue(peRatioTtm),
+    pbRatio: roundMetricValue(dailyBasicRow?.pb),
+    dividendYield2026: normalizeDailyBasicDividendRate(dailyBasicRow?.dvTtm),
+    dividendYield2025: normalizeDailyBasicDividendRate(dailyBasicRow?.dvRatio),
+    forecastRevenueGrowthRate: roundMetricValue(forecastRevenueGrowthRate),
+    forecastProfitGrowthRate: roundMetricValue(forecastProfitGrowthRate),
+    forecastPe3Years: roundMetricValue(forecastPe3Years),
+    annualPriceChange: null,
+    revGrowthRateNew: roundMetricValue(q1Row?.revenueGrowthRate),
+    profitGrowthRateNew: roundMetricValue(q1Row?.profitGrowthRate),
+    peForecastNew: roundMetricValue(forecastPe3Years),
+    targetPrice1: override?.targetPrice1 || '',
+    targetPrice2: override?.targetPrice2 || '',
+    note1: override?.note1 || '',
+    note2: override?.note2 || '',
+    reportDate: q1Row?.reportDate || null,
+    quoteDate: q1Row?.quoteDate || dailyBasicRow?.tradeDate || null,
+    q1Source: q1Row?.source || null,
+    quote: {
+      price: roundMetricValue(stockPrice),
+      change: null,
+      changeRate: null,
+      date: q1Row?.quoteDate || dailyBasicRow?.tradeDate || null,
+      instrumentType: 'STOCK'
+    }
+  };
+}
+
+function getDailyBasicRowForInstrument(snapshot, instrument) {
+  if (!snapshot?.byTsCode || !instrument) return null;
+  try {
+    return snapshot.byTsCode.get(toTushareTsCode(instrument.symbol)) || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function getStockTableOverride(overrides, instrument) {
+  if (!overrides || !instrument) return {};
+  return overrides[instrument.id] || overrides[`STOCK:${instrument.code}`] || overrides[instrument.code] || {};
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const number = toFiniteNumber(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function toNullableNumber(value) {
+  const number = toFiniteNumber(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeDailyBasicDividendRate(value) {
+  const number = toFiniteNumber(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.abs(number) > 1 ? roundMetricValue(number / 100) : roundMetricValue(number);
+}
+
+function calculateStockTableForecastPe(peRatioTtm, revenueGrowthRate, profitGrowthRate) {
+  const pe = toFiniteNumber(peRatioTtm);
+  if (!Number.isFinite(pe) || pe <= 0) return null;
+  const growth = Math.max(toFiniteNumber(revenueGrowthRate) || 0, toFiniteNumber(profitGrowthRate) || 0);
+  if (growth <= -0.99) return null;
+  const divisor = (1 + growth) ** 3;
+  return divisor > 0 ? pe / divisor : null;
+}
+
+function filterStockTableRows(rows, { search, filters }) {
+  const query = normalizeSearchText(search);
+  return rows.filter((row) => {
+    if (query && !normalizeSearchText([
+      row.tickerSymbol,
+      row.tickerName,
+      row.industryCategory,
+      row.marketLabel,
+      row.searchText
+    ].join(' ')).includes(query)) {
+      return false;
+    }
+
+    return (filters || []).every((filter) => applyStockTableFilter(row, filter));
+  });
+}
+
+function normalizeSearchText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function applyStockTableFilter(row, filter) {
+  const value = row?.[filter.field];
+  if (value === null || value === undefined || value === '') return false;
+
+  if (STOCK_TABLE_NUMERIC_FIELDS.has(filter.field)) {
+    const number = toFiniteNumber(value);
+    let filterNumber = Number(filter.value);
+    if (STOCK_TABLE_PERCENT_FIELDS.has(filter.field) && Math.abs(filterNumber) > 1) {
+      filterNumber /= 100;
+    }
+    if (!Number.isFinite(number) || !Number.isFinite(filterNumber)) return false;
+    if (filter.op === 'eq') return number === filterNumber;
+    if (filter.op === 'gt') return number > filterNumber;
+    if (filter.op === 'gte') return number >= filterNumber;
+    if (filter.op === 'lt') return number < filterNumber;
+    if (filter.op === 'lte') return number <= filterNumber;
+  }
+
+  const text = String(value).toLowerCase();
+  const filterText = String(filter.value).toLowerCase();
+  if (filter.op === 'eq') return text === filterText;
+  return text.includes(filterText);
+}
+
+function sortStockTableRows(rows, field, direction) {
+  const multiplier = direction === 'DESC' ? -1 : 1;
+  return [...rows].sort((left, right) => compareStockTableValues(left?.[field], right?.[field]) * multiplier);
+}
+
+function compareStockTableValues(leftValue, rightValue) {
+  const leftNumber = toFiniteNumber(leftValue);
+  const rightNumber = toFiniteNumber(rightValue);
+  if (Number.isFinite(leftNumber) || Number.isFinite(rightNumber)) {
+    if (!Number.isFinite(leftNumber)) return 1;
+    if (!Number.isFinite(rightNumber)) return -1;
+    return leftNumber - rightNumber;
+  }
+  return String(leftValue || '').localeCompare(String(rightValue || ''), 'zh-CN', { numeric: true });
+}
+
 function parseNullableNumber(value) {
   if (value === undefined || value === null || String(value).trim() === '') return null;
   const number = Number(value);
@@ -5724,7 +6062,7 @@ async function getTushareDailyBasicSnapshot() {
     for (const tradeDate of tradeDates) {
       const rows = await fetchTushareTable('daily_basic', {
         trade_date: tradeDate
-      }, 'ts_code,trade_date,pe_ttm,close,total_share,total_mv').catch(() => []);
+      }, 'ts_code,trade_date,pe_ttm,pb,dv_ratio,dv_ttm,close,total_share,total_mv').catch(() => []);
 
       if (!rows.length) continue;
 
@@ -5732,6 +6070,9 @@ async function getTushareDailyBasicSnapshot() {
         tsCode: String(row.ts_code || '').trim().toUpperCase(),
         tradeDate: normalizeDate(row.trade_date),
         peTtm: toFiniteNumber(row.pe_ttm),
+        pb: toFiniteNumber(row.pb),
+        dvRatio: toFiniteNumber(row.dv_ratio),
+        dvTtm: toFiniteNumber(row.dv_ttm),
         close: toFiniteNumber(row.close),
         totalShares: Number.isFinite(toFiniteNumber(row.total_share)) ? toFiniteNumber(row.total_share) * 10000 : null,
         totalMarketValue: Number.isFinite(toFiniteNumber(row.total_mv)) ? toFiniteNumber(row.total_mv) * 10000 : null

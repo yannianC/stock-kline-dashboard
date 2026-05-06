@@ -19,7 +19,7 @@ import {
   X
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
-import { loadCompareDetail, loadInstrumentDetail, loadInstruments } from './api.js';
+import { loadCompareDetail, loadInstrumentDetail, loadInstruments, loadStockTable, saveStockTableCell } from './api.js';
 import { formatCompact } from './chartUtils.js';
 
 const EMPTY_SERIES = [];
@@ -105,6 +105,46 @@ const DEFAULT_COMPARE_MULTIPLIER = '1';
 const DEFAULT_STRATEGY_LEVERAGE = '1';
 const COMPARE_MINUTE_DEFAULT_LOOKBACK_DAYS = 3650;
 const COMPARE_MINUTE_MAX_LOOKBACK_DAYS = 15000;
+const STOCK_TABLE_PAGE_SIZE = 80;
+const STOCK_TABLE_COLUMNS = [
+  { key: 'tickerSymbol', label: '股票代码', sortable: true, compact: true },
+  { key: 'tickerName', label: '股票简称', sortable: true, sticky: true },
+  { key: 'compare', label: '对比', action: true },
+  { key: 'performanceGrowthScore', label: '业绩增长\n评分', sortable: true, editable: true, format: 'score' },
+  { key: 'overallScore', label: '综合评分', sortable: true, editable: true, format: 'score' },
+  { key: 'liudaScore', label: '刘大评分', sortable: true, editable: true, format: 'score' },
+  { key: 'marketCap', label: '总市值\n(元)', sortable: true, format: 'amount' },
+  { key: 'stockPrice', label: '股价', sortable: true, format: 'price' },
+  { key: 'grossRevenue', label: '营业收入', sortable: true, format: 'amount' },
+  { key: 'netProfit', label: '净利润', sortable: true, format: 'amount' },
+  { key: 'industryCategory', label: '所属行业', sortable: true },
+  { key: 'peRatioTtm', label: '市盈率\n(ttm)', sortable: true, format: 'ratio' },
+  { key: 'pbRatio', label: '市净率', sortable: true, format: 'ratio' },
+  { key: 'dividendYield2026', label: '2026年\n股息率', sortable: true, format: 'percent' },
+  { key: 'dividendYield2025', label: '2025年\n股息率', sortable: true, format: 'percent' },
+  { key: 'forecastRevenueGrowthRate', label: '收入预测\n增长率', sortable: true, format: 'percent' },
+  { key: 'forecastProfitGrowthRate', label: '利润预测\n增长率', sortable: true, format: 'percent' },
+  { key: 'forecastPe3Years', label: '预测\n3年后PE', sortable: true, format: 'ratio' },
+  { key: 'annualPriceChange', label: '5年内\n涨跌幅', sortable: true, format: 'percent' },
+  { key: 'revGrowthRateNew', label: '新营收\n增长率', sortable: true, format: 'percent' },
+  { key: 'profitGrowthRateNew', label: '新利润\n增长率', sortable: true, format: 'percent' },
+  { key: 'peForecastNew', label: '新预测PE', sortable: true, format: 'ratio' },
+  { key: 'targetPrice1', label: '一级目标价', editable: true },
+  { key: 'targetPrice2', label: '二级目标价', editable: true },
+  { key: 'note1', label: '备注1', editable: true, wide: true },
+  { key: 'note2', label: '备注2', editable: true, wide: true }
+];
+const STOCK_FILTER_FIELDS = STOCK_TABLE_COLUMNS
+  .filter((column) => !column.action)
+  .map((column) => ({ key: column.key, label: column.label.replace(/\n/g, '') }));
+const STOCK_FILTER_OPERATORS = [
+  { key: 'contains', label: '包含' },
+  { key: 'eq', label: '=' },
+  { key: 'gte', label: '>=' },
+  { key: 'lte', label: '<=' },
+  { key: 'gt', label: '>' },
+  { key: 'lt', label: '<' }
+];
 
 function App() {
   const [route, setRoute] = useState(() => getRouteState());
@@ -208,11 +248,10 @@ function App() {
 function InstrumentListPage({ compareFavorites, onOpenDetail, onOpenCompare }) {
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
-  const [type, setType] = useState('all');
-  const [peFilterInput, setPeFilterInput] = useState('');
-  const [q1ProfitGrowthInput, setQ1ProfitGrowthInput] = useState('');
-  const [appliedPeFilter, setAppliedPeFilter] = useState('');
-  const [appliedQ1ProfitGrowthFilter, setAppliedQ1ProfitGrowthFilter] = useState('');
+  const [type, setType] = useState('STOCK');
+  const [stockFilterDrafts, setStockFilterDrafts] = useState(() => createDefaultStockFilterDrafts());
+  const [stockFilters, setStockFilters] = useState([]);
+  const [stockSort, setStockSort] = useState({ field: 'tickerSymbol', direction: 'ASC' });
   const [page, setPage] = useState(1);
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -242,21 +281,28 @@ function InstrumentListPage({ compareFavorites, onOpenDetail, onOpenCompare }) {
     setError('');
 
     try {
-      const next = await loadInstruments({
-        page,
-        pageSize: 40,
-        search,
-        type,
-        peLte: type === 'STOCK' ? appliedPeFilter : '',
-        q1ProfitGrowthGte: type === 'STOCK' ? appliedQ1ProfitGrowthFilter : ''
-      });
+      const next = type === 'STOCK'
+        ? await loadStockTable({
+          page,
+          pageSize: STOCK_TABLE_PAGE_SIZE,
+          search,
+          sortField: stockSort.field,
+          sortDirection: stockSort.direction,
+          filters: stockFilters
+        })
+        : await loadInstruments({
+          page,
+          pageSize: 40,
+          search,
+          type
+        });
       setPayload(next);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
       setLoading(false);
     }
-  }, [appliedPeFilter, appliedQ1ProfitGrowthFilter, page, search, type]);
+  }, [page, search, stockFilters, stockSort, type]);
 
   useEffect(() => {
     fetchList();
@@ -323,6 +369,22 @@ function InstrumentListPage({ compareFavorites, onOpenDetail, onOpenCompare }) {
   const totalCount = type === 'RATIO' ? ratioFavorites.length : payload?.total ?? '--';
   const listTypes = payload?.listTypes || DEFAULT_TYPES;
   const q1SnapshotMeta = payload?.filters?.q1Snapshot || null;
+  const handleStockSort = useCallback((field) => {
+    setPage(1);
+    setStockSort((current) => ({
+      field,
+      direction: current.field === field && current.direction === 'ASC' ? 'DESC' : 'ASC'
+    }));
+  }, []);
+  const handleStockCellSaved = useCallback(({ id, field, value }) => {
+    setPayload((current) => {
+      if (!current?.items) return current;
+      return {
+        ...current,
+        items: current.items.map((item) => (item.id === id ? { ...item, [field]: value } : item))
+      };
+    });
+  }, []);
 
   return (
     <main className="app-shell">
@@ -384,122 +446,59 @@ function InstrumentListPage({ compareFavorites, onOpenDetail, onOpenCompare }) {
       </section>
 
       {type === 'STOCK' ? (
-        <section className="stock-filter-panel">
-          <div className="stock-filter-grid">
-            <label className="filter-input">
-              <span>市盈率 ≤</span>
-              <input
-                type="number"
-                inputMode="decimal"
-                value={peFilterInput}
-                onChange={(event) => setPeFilterInput(event.target.value)}
-                placeholder="例如 8"
-              />
-            </label>
-            <label className="filter-input">
-              <span>一季度利润增长 ≥ %</span>
-              <input
-                type="number"
-                inputMode="decimal"
-                value={q1ProfitGrowthInput}
-                onChange={(event) => setQ1ProfitGrowthInput(event.target.value)}
-                placeholder="例如 20"
-              />
-            </label>
-          </div>
-          <div className="stock-filter-actions">
-            <button
-              className="icon-button"
-              onClick={() => {
-                setPage(1);
-                setAppliedPeFilter(peFilterInput.trim());
-                setAppliedQ1ProfitGrowthFilter(q1ProfitGrowthInput.trim());
-              }}
-              disabled={loading}
-            >
-              应用筛选
-            </button>
-            <button
-              className="icon-button is-muted"
-              onClick={() => {
-                setPeFilterInput('');
-                setQ1ProfitGrowthInput('');
-                setAppliedPeFilter('');
-                setAppliedQ1ProfitGrowthFilter('');
-                setPage(1);
-              }}
-              disabled={loading && !appliedPeFilter && !appliedQ1ProfitGrowthFilter}
-            >
-              清空
-            </button>
-            <span className="filter-help">
-              一季度利润增长输入 `20` 表示 `20%`。当前快照范围：`000001` 到 `002902`
-              {q1SnapshotMeta?.generatedAt ? `，快照生成于 ${formatTableTime(q1SnapshotMeta.generatedAt)}` : ''}
-            </span>
-          </div>
-        </section>
+        <StockFilterPanel
+          drafts={stockFilterDrafts}
+          activeFilters={stockFilters}
+          loading={loading}
+          meta={q1SnapshotMeta}
+          onDraftsChange={setStockFilterDrafts}
+          onApply={(filters) => {
+            setPage(1);
+            setStockFilters(filters);
+          }}
+          onClear={() => {
+            setStockFilterDrafts(createDefaultStockFilterDrafts());
+            setStockFilters([]);
+            setPage(1);
+          }}
+        />
       ) : null}
 
       {error ? <div className="error-banner">{error}</div> : null}
 
       <section className="list-region">
         <div className="table-scroll">
-          <table className="market-table">
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>代码</th>
-                <th>分类</th>
-                <th>市场</th>
-                <th>最新价</th>
-                <th>涨跌额</th>
-                <th>涨跌幅</th>
-                <th>时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pageItems.map((item) => {
+          {type === 'STOCK' ? (
+            <StockTable
+              items={pageItems}
+              sort={stockSort}
+              onSort={handleStockSort}
+              onOpenDetail={onOpenDetail}
+              onOpenCompare={(item) => {
                 const compareSpec = getCompareSpecFromItem(item);
-
-                return (
-                  <tr
-                    key={item.id}
-                    onClick={() => openListItem(item, { onOpenDetail, onOpenCompare })}
-                    className="table-row"
-                  >
-                    <td>
-                      <div className="symbol-cell">
-                        <div className="symbol-main">
-                          <strong>{item.name}</strong>
-                          <button
-                            className="compare-inline-button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setCompareDraft({
-                                left: compareSpec ? buildDraftOptionFromSpec(item, compareSpec, 'left') : toCompareOption(item),
-                                right: compareSpec ? buildDraftOptionFromSpec(item, compareSpec, 'right') : null,
-                                mode: compareSpec?.mode || 'divide'
-                              });
-                            }}
-                          >
-                            对比
-                          </button>
-                        </div>
-                        {item.chineseName && item.chineseName !== item.name ? <span>{item.chineseName}</span> : null}
-                      </div>
-                    </td>
-                    <td>{getDisplayCodeText(item)}</td>
-                    <td>{item.typeLabel}</td>
-                    <td>{item.marketLabel}</td>
-                    <td>{formatQuotePrice(item.quote?.price, item.quote?.instrumentType || item.type)}</td>
-                    <td className={toneClass(item.quote?.change)}>{formatSigned(item.quote?.change)}</td>
-                    <td className={toneClass(item.quote?.changeRate)}>{formatSignedPercent(item.quote?.changeRate)}</td>
-                    <td>{formatTableTime(item.quote?.date)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                setCompareDraft({
+                  left: compareSpec ? buildDraftOptionFromSpec(item, compareSpec, 'left') : toCompareOption(item),
+                  right: compareSpec ? buildDraftOptionFromSpec(item, compareSpec, 'right') : null,
+                  mode: compareSpec?.mode || 'divide'
+                });
+              }}
+              onCellSaved={handleStockCellSaved}
+            />
+          ) : (
+            <DefaultInstrumentTable
+              items={pageItems}
+              onOpenDetail={onOpenDetail}
+              onOpenCompareRoute={onOpenCompare}
+              onOpenCompareDraft={(item) => {
+                const compareSpec = getCompareSpecFromItem(item);
+                setCompareDraft({
+                  left: compareSpec ? buildDraftOptionFromSpec(item, compareSpec, 'left') : toCompareOption(item),
+                  right: compareSpec ? buildDraftOptionFromSpec(item, compareSpec, 'right') : null,
+                  mode: compareSpec?.mode || 'divide'
+                });
+              }}
+            />
+          )}
 
           {!loading && !pageItems.length ? <div className="empty-state">没有匹配到品种。</div> : null}
           {loading && type !== 'RATIO' ? <div className="loading-layer">正在加载品种列表...</div> : null}
@@ -536,6 +535,297 @@ function InstrumentListPage({ compareFavorites, onOpenDetail, onOpenCompare }) {
       />
     </main>
   );
+}
+
+function DefaultInstrumentTable({ items, onOpenDetail, onOpenCompareRoute, onOpenCompareDraft }) {
+  return (
+    <table className="market-table">
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>代码</th>
+          <th>分类</th>
+          <th>市场</th>
+          <th>最新价</th>
+          <th>涨跌额</th>
+          <th>涨跌幅</th>
+          <th>时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((item) => (
+          <tr
+            key={item.id}
+            onClick={() => openListItem(item, { onOpenDetail, onOpenCompare: onOpenCompareRoute })}
+            className="table-row"
+          >
+            <td>
+              <div className="symbol-cell">
+                <div className="symbol-main">
+                  <strong>{item.name}</strong>
+                  <button
+                    className="compare-inline-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenCompareDraft(item);
+                    }}
+                  >
+                    对比
+                  </button>
+                </div>
+                {item.chineseName && item.chineseName !== item.name ? <span>{item.chineseName}</span> : null}
+              </div>
+            </td>
+            <td>{getDisplayCodeText(item)}</td>
+            <td>{item.typeLabel}</td>
+            <td>{item.marketLabel}</td>
+            <td>{formatQuotePrice(item.quote?.price, item.quote?.instrumentType || item.type)}</td>
+            <td className={toneClass(item.quote?.change)}>{formatSigned(item.quote?.change)}</td>
+            <td className={toneClass(item.quote?.changeRate)}>{formatSignedPercent(item.quote?.changeRate)}</td>
+            <td>{formatTableTime(item.quote?.date)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSaved }) {
+  return (
+    <table className="market-table stock-data-table">
+      <thead>
+        <tr>
+          {STOCK_TABLE_COLUMNS.map((column) => (
+            <th key={column.key} className={column.sticky ? 'stock-name-header' : ''}>
+              {column.sortable ? (
+                <button className="table-sort-button" onClick={() => onSort(column.key)}>
+                  {column.label.split('\n').map((part) => <span key={part}>{part}</span>)}
+                  <b>{sort.field === column.key ? (sort.direction === 'ASC' ? '↑' : '↓') : ''}</b>
+                </button>
+              ) : (
+                column.label.split('\n').map((part) => <span key={part}>{part}</span>)
+              )}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((item) => (
+          <tr key={item.id} className="table-row" onClick={() => onOpenDetail(item.id)}>
+            {STOCK_TABLE_COLUMNS.map((column) => (
+              <td key={column.key} className={getStockTableCellClass(column)}>
+                {renderStockTableCell({ item, column, onOpenCompare, onCellSaved })}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function renderStockTableCell({ item, column, onOpenCompare, onCellSaved }) {
+  if (column.key === 'compare') {
+    return (
+      <button
+        className="compare-inline-button is-visible"
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpenCompare(item);
+        }}
+      >
+        对比
+      </button>
+    );
+  }
+
+  if (column.key === 'tickerName') {
+    return (
+      <div className="stock-name-cell">
+        <strong>{item.tickerName || item.name}</strong>
+        <span>{item.marketLabel}</span>
+      </div>
+    );
+  }
+
+  if (column.editable) {
+    return (
+      <StockEditableCell
+        item={item}
+        column={column}
+        onSaved={onCellSaved}
+      />
+    );
+  }
+
+  return (
+    <span className={getStockValueTone(item[column.key], column.format)}>
+      {formatStockTableValue(item[column.key], column.format)}
+    </span>
+  );
+}
+
+function StockEditableCell({ item, column, onSaved }) {
+  const [value, setValue] = useState(() => formatEditableStockValue(item[column.key]));
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setValue(formatEditableStockValue(item[column.key]));
+  }, [item.id, item[column.key]]);
+
+  const save = async () => {
+    const nextValue = value.trim();
+    if (nextValue === formatEditableStockValue(item[column.key])) return;
+    setSaving(true);
+    try {
+      const normalizedValue = ['performanceGrowthScore', 'overallScore', 'liudaScore'].includes(column.key)
+        ? (nextValue === '' ? null : Number(nextValue))
+        : nextValue;
+      await saveStockTableCell({
+        id: item.id,
+        code: item.code,
+        field: column.key,
+        value: normalizedValue
+      });
+      onSaved?.({ id: item.id, field: column.key, value: normalizedValue });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <input
+      className={column.wide ? 'stock-edit-input is-wide' : 'stock-edit-input'}
+      value={value}
+      disabled={saving}
+      onClick={(event) => event.stopPropagation()}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={save}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
+function StockFilterPanel({ drafts, activeFilters, loading, meta, onDraftsChange, onApply, onClear }) {
+  const updateDraft = (index, patch) => {
+    onDraftsChange(drafts.map((draft, draftIndex) => (draftIndex === index ? { ...draft, ...patch } : draft)));
+  };
+  const normalizedFilters = drafts
+    .map((draft) => ({ ...draft, value: String(draft.value || '').trim() }))
+    .filter((draft) => draft.field && draft.value !== '');
+
+  return (
+    <section className="stock-filter-panel stock-filter-panel-rich">
+      <div className="stock-filter-toolbar">
+        <strong>股票筛选</strong>
+        <span>支持多条件同时过滤，数值字段可用大于、小于；文本字段用包含。</span>
+        {activeFilters.length ? <b>{activeFilters.length} 个条件生效</b> : null}
+      </div>
+      <div className="stock-filter-builder">
+        {drafts.map((draft, index) => (
+          <div className="stock-filter-rule" key={index}>
+            <select value={draft.field} onChange={(event) => updateDraft(index, { field: event.target.value })}>
+              {STOCK_FILTER_FIELDS.map((field) => (
+                <option key={field.key} value={field.key}>{field.label}</option>
+              ))}
+            </select>
+            <select value={draft.op} onChange={(event) => updateDraft(index, { op: event.target.value })}>
+              {STOCK_FILTER_OPERATORS.map((operator) => (
+                <option key={operator.key} value={operator.key}>{operator.label}</option>
+              ))}
+            </select>
+            <input
+              value={draft.value}
+              onChange={(event) => updateDraft(index, { value: event.target.value })}
+              placeholder="输入筛选值"
+            />
+            <button
+              className="icon-button"
+              onClick={() => onDraftsChange(drafts.filter((_, draftIndex) => draftIndex !== index))}
+              disabled={drafts.length <= 1}
+            >
+              删除
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="stock-filter-actions">
+        <button
+          className="icon-button"
+          onClick={() => onDraftsChange([...drafts, createStockFilterDraft()])}
+        >
+          添加条件
+        </button>
+        <button className="icon-button modal-confirm" onClick={() => onApply(normalizedFilters)} disabled={loading}>
+          应用筛选
+        </button>
+        <button className="icon-button is-muted" onClick={onClear} disabled={loading && !activeFilters.length}>
+          清空
+        </button>
+        <span className="filter-help">
+          当前快照范围：`000001` 到 `002902`
+          {meta?.generatedAt ? `，快照生成于 ${formatTableTime(meta.generatedAt)}` : ''}
+        </span>
+      </div>
+    </section>
+  );
+}
+
+function createStockFilterDraft(field = 'peRatioTtm', op = 'lte', value = '') {
+  return { field, op, value };
+}
+
+function createDefaultStockFilterDrafts() {
+  return [
+    createStockFilterDraft('peRatioTtm', 'lte', ''),
+    createStockFilterDraft('profitGrowthRateNew', 'gte', '')
+  ];
+}
+
+function getStockTableCellClass(column) {
+  const classes = [];
+  if (column.compact) classes.push('is-compact');
+  if (column.wide) classes.push('is-wide');
+  if (column.sticky) classes.push('stock-name-column');
+  if (column.format === 'percent') classes.push('is-number');
+  if (['amount', 'price', 'ratio', 'score'].includes(column.format)) classes.push('is-number');
+  return classes.join(' ');
+}
+
+function formatEditableStockValue(value) {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function formatStockTableValue(value, format) {
+  if (value === null || value === undefined || value === '') return '--';
+  const number = Number(value);
+
+  if (format === 'amount') {
+    return Number.isFinite(number) ? formatAmountWithYi(number) : '--';
+  }
+  if (format === 'percent') {
+    return Number.isFinite(number) ? `${(number * 100).toFixed(2)}%` : '--';
+  }
+  if (format === 'price') {
+    return Number.isFinite(number) ? formatQuotePrice(number, 'STOCK') : '--';
+  }
+  if (format === 'ratio' || format === 'score') {
+    return Number.isFinite(number)
+      ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 }).format(number)
+      : '--';
+  }
+
+  return String(value);
+}
+
+function getStockValueTone(value, format) {
+  if (format !== 'percent') return '';
+  return toneClass(Number(value));
 }
 
 function CompareDetailPage({

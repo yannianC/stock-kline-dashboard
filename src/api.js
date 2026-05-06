@@ -103,6 +103,42 @@ export function loadInstruments({
   return requestJson('api/instruments', { page, pageSize, search, type, peLte, q1ProfitGrowthGte }, { force });
 }
 
+export function loadStockTable({
+  page = 1,
+  pageSize = 80,
+  search = '',
+  sortField = 'tickerSymbol',
+  sortDirection = 'ASC',
+  filters = [],
+  force = false
+} = {}) {
+  return requestJson('api/stock-table', {
+    page,
+    pageSize,
+    search,
+    sortField,
+    sortDirection,
+    filters: filters?.length ? JSON.stringify(filters) : ''
+  }, { force });
+}
+
+export async function saveStockTableCell({ id, code, field, value }) {
+  const response = await fetch('api/stock-table/edit', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ id, code, field, value })
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.message || `HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
 export function loadInstrumentDetail({ id, interval = 'day', force = false }) {
   return requestJson('api/instrument-detail', { id, interval }, { force });
 }

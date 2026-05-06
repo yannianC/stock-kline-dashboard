@@ -7,6 +7,7 @@ npm-debug.log*
 catalog-cache.json
 server/catalog-cache.json
 server/stock-q1-cache.json
+server/stock-table-overrides.json
 server/response-cache/
 __pycache__/
 *.pyc
