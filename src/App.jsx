@@ -19,7 +19,7 @@ import {
   X
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
-import { loadCompareDetail, loadInstrumentDetail, loadInstruments, loadStockTable, saveStockTableCell } from './api.js';
+import { loadCompareDetail, loadInstrumentDetail, loadInstruments, loadStockFinancialCharts, loadStockTable, saveStockTableCell } from './api.js';
 import { formatCompact } from './chartUtils.js';
 
 const EMPTY_SERIES = [];
@@ -115,8 +115,8 @@ const STOCK_TABLE_COLUMNS = [
   { key: 'liudaScore', label: '刘大评分', sortable: true, editable: true, format: 'score' },
   { key: 'marketCap', label: '总市值\n(元)', sortable: true, format: 'amount' },
   { key: 'stockPrice', label: '股价', sortable: true, format: 'price' },
-  { key: 'grossRevenue', label: '营业收入', sortable: true, format: 'amount' },
-  { key: 'netProfit', label: '净利润', sortable: true, format: 'amount' },
+  { key: 'grossRevenue', label: '营业收入', sortable: true, format: 'amount', chart: 'revenue' },
+  { key: 'netProfit', label: '净利润', sortable: true, format: 'amount', chart: 'profit' },
   { key: 'industryCategory', label: '所属行业', sortable: true },
   { key: 'peRatioTtm', label: '市盈率\n(ttm)', sortable: true, format: 'ratio' },
   { key: 'pbRatio', label: '市净率', sortable: true, format: 'ratio' },
@@ -134,6 +134,25 @@ const STOCK_TABLE_COLUMNS = [
   { key: 'note1', label: '备注1', editable: true, wide: true },
   { key: 'note2', label: '备注2', editable: true, wide: true }
 ];
+const STOCK_FINANCIAL_CHART_MODES = [
+  { key: 'total', label: '全部', valueKey: 'total', growthKey: 'gr' },
+  { key: 'q1', label: '一季报', valueKey: 'q1', growthKey: 'q1Gr' },
+  { key: 'q2', label: '二季报', valueKey: 'q2', growthKey: 'q2Gr' },
+  { key: 'q3', label: '三季报', valueKey: 'q3', growthKey: 'q3Gr' },
+  { key: 'q4', label: '四季报', valueKey: 'q4', growthKey: 'q4Gr' },
+  { key: 'midR', label: '中报', valueKey: 'midR', growthKey: 'midRGr' },
+  { key: 'q3R', label: '累计三季', valueKey: 'q3R', growthKey: 'q3RGr' }
+];
+const STOCK_FINANCIAL_STACK_KEYS = ['q1', 'q2', 'q3', 'q4'];
+const STOCK_FINANCIAL_STACK_COLORS = ['#94d17e', '#ffd260', '#ef676a', '#77c4e5'];
+const STOCK_FINANCIAL_SINGLE_COLORS = {
+  q1: '#94d17e',
+  q2: '#ffd260',
+  q3: '#ef676a',
+  q4: '#77c4e5',
+  midR: '#50b6a8',
+  q3R: '#8b8ce8'
+};
 const STOCK_FILTER_FIELDS = STOCK_TABLE_COLUMNS
   .filter((column) => !column.action)
   .map((column) => ({ key: column.key, label: column.label.replace(/\n/g, '') }));
@@ -591,6 +610,44 @@ function DefaultInstrumentTable({ items, onOpenDetail, onOpenCompareRoute, onOpe
 }
 
 function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSaved }) {
+  const [chartMap, setChartMap] = useState({});
+  const [pendingChartCodes, setPendingChartCodes] = useState(new Set());
+
+  useEffect(() => {
+    const missingCodes = items
+      .filter((item) => item?.tickerSymbol && !item.financialCharts && !chartMap[item.tickerSymbol])
+      .map((item) => item.tickerSymbol);
+    if (!missingCodes.length) return;
+
+    let cancelled = false;
+    setPendingChartCodes((current) => new Set([...current, ...missingCodes]));
+
+    loadStockFinancialCharts({ codes: missingCodes })
+      .then((payload) => {
+        if (cancelled) return;
+        const nextItems = payload.items || {};
+        if (Object.keys(nextItems).length) {
+          setChartMap((current) => ({
+            ...current,
+            ...nextItems
+          }));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (cancelled) return;
+        setPendingChartCodes((current) => {
+          const next = new Set(current);
+          missingCodes.forEach((code) => next.delete(code));
+          return next;
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [items, chartMap]);
+
   return (
     <table className="market-table stock-data-table">
       <thead>
@@ -614,7 +671,13 @@ function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSa
           <tr key={item.id} className="table-row" onClick={() => onOpenDetail(item.id)}>
             {STOCK_TABLE_COLUMNS.map((column) => (
               <td key={column.key} className={getStockTableCellClass(column)}>
-                {renderStockTableCell({ item, column, onOpenCompare, onCellSaved })}
+                {renderStockTableCell({
+                  item: chartMap[item.tickerSymbol] ? { ...item, financialCharts: chartMap[item.tickerSymbol] } : item,
+                  column,
+                  onOpenCompare,
+                  onCellSaved,
+                  chartLoading: pendingChartCodes.has(item.tickerSymbol)
+                })}
               </td>
             ))}
           </tr>
@@ -624,7 +687,7 @@ function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSa
   );
 }
 
-function renderStockTableCell({ item, column, onOpenCompare, onCellSaved }) {
+function renderStockTableCell({ item, column, onOpenCompare, onCellSaved, chartLoading = false }) {
   if (column.key === 'compare') {
     return (
       <button
@@ -658,11 +721,185 @@ function renderStockTableCell({ item, column, onOpenCompare, onCellSaved }) {
     );
   }
 
+  if (column.chart) {
+    return (
+      <StockFinancialChartCell
+        title={column.label}
+        rows={item.financialCharts?.[column.chart]}
+        tone={column.chart}
+        fallbackValue={item[column.key]}
+        loading={chartLoading}
+      />
+    );
+  }
+
   return (
     <span className={getStockValueTone(item[column.key], column.format)}>
       {formatStockTableValue(item[column.key], column.format)}
     </span>
   );
+}
+
+function StockFinancialChartCell({ title, rows, tone, fallbackValue, loading = false }) {
+  const [modeKey, setModeKey] = useState('total');
+  const mode = STOCK_FINANCIAL_CHART_MODES.find((item) => item.key === modeKey) || STOCK_FINANCIAL_CHART_MODES[0];
+  const visibleRows = (rows || []).filter(Boolean).slice(-13);
+
+  if (!visibleRows.length) {
+    return (
+      <span className="stock-financial-loading">
+        <b className={getStockValueTone(fallbackValue, 'amount')}>{formatStockTableValue(fallbackValue, 'amount')}</b>
+        {loading ? <small>图表加载中...</small> : null}
+      </span>
+    );
+  }
+
+  return (
+    <div className={`stock-financial-cell ${tone}`} onClick={(event) => event.stopPropagation()}>
+      <div className="stock-financial-mode-grid">
+        {STOCK_FINANCIAL_CHART_MODES.map((option) => (
+          <button
+            key={option.key}
+            className={option.key === mode.key ? 'is-active' : ''}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setModeKey(option.key);
+            }}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      <StockFinancialMiniChart title={title} rows={visibleRows} mode={mode} tone={tone} />
+    </div>
+  );
+}
+
+function StockFinancialMiniChart({ title, rows, mode, tone }) {
+  const width = 330;
+  const height = 158;
+  const padding = { top: 10, right: 38, bottom: 24, left: 48 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const amountValues = mode.key === 'total'
+    ? rows.map((row) => Math.max(0, toFiniteNumber(row.total) || 0))
+    : rows.map((row) => toFiniteNumber(row[mode.valueKey]) || 0);
+  const growthValues = rows.map((row) => toFiniteNumber(row[mode.growthKey])).filter(Number.isFinite);
+  const minAmount = mode.key === 'total' ? 0 : Math.min(0, ...amountValues);
+  const maxAmount = Math.max(1, ...amountValues);
+  const amountRange = maxAmount - minAmount || 1;
+  const maxGrowthAbs = Math.max(0.5, ...growthValues.map((value) => Math.abs(value * 100)));
+  const groupStep = chartWidth / Math.max(1, rows.length);
+  const barWidth = Math.max(7, Math.min(16, groupStep * 0.58));
+  const xForIndex = (index) => padding.left + groupStep * index + groupStep / 2;
+  const amountY = (value) => padding.top + ((maxAmount - value) / amountRange) * chartHeight;
+  const zeroY = amountY(0);
+  const growthY = (value) => padding.top + chartHeight / 2 - ((value * 100) / maxGrowthAbs) * (chartHeight / 2);
+  const linePoints = rows
+    .map((row, index) => {
+      const value = toFiniteNumber(row[mode.growthKey]);
+      return Number.isFinite(value) ? `${xForIndex(index)},${growthY(value)}` : null;
+    })
+    .filter(Boolean)
+    .join(' ');
+  const amountTicks = minAmount < 0 ? [maxAmount, 0, minAmount] : [maxAmount, maxAmount / 2, 0];
+  const growthTicks = [maxGrowthAbs, 0, -maxGrowthAbs];
+
+  return (
+    <svg className="stock-financial-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}${mode.label}柱状图`}>
+      <rect x={padding.left} y={padding.top} width={chartWidth} height={chartHeight} fill="#f8faf7" />
+      {amountTicks.map((tick) => {
+        const y = amountY(tick);
+        return (
+          <g key={`amount-${tick}`}>
+            <line x1={padding.left} x2={padding.left + chartWidth} y1={y} y2={y} stroke="#dce4ee" strokeWidth="1" />
+            <text x={padding.left - 8} y={y + 4} textAnchor="end">{formatCompactAmountTick(tick)}</text>
+          </g>
+        );
+      })}
+      {growthTicks.map((tick) => (
+        <text key={`growth-${tick}`} x={padding.left + chartWidth + 12} y={growthY(tick / 100) + 4}>{formatGrowthTick(tick)}</text>
+      ))}
+      {rows.map((row, index) => {
+        const x = xForIndex(index) - barWidth / 2;
+        if (mode.key !== 'total') {
+          const value = toFiniteNumber(row[mode.valueKey]) || 0;
+          const y = value >= 0 ? amountY(value) : zeroY;
+          const barHeight = Math.max(1, Math.abs(zeroY - amountY(value)));
+          return (
+            <rect
+              key={row.year}
+              x={x}
+              y={y}
+              width={barWidth}
+              height={barHeight}
+              rx="1"
+              fill={value < 0 ? '#ef4444' : STOCK_FINANCIAL_SINGLE_COLORS[mode.key] || (tone === 'profit' ? '#8b8ce8' : '#50b6a8')}
+            >
+              <title>{`${row.year} ${mode.label}: ${formatAmountWithYi(value)}，同比 ${formatDecimalPercent(row[mode.growthKey])}`}</title>
+            </rect>
+          );
+        }
+
+        let cursorY = zeroY;
+        return (
+          <g key={row.year}>
+            {STOCK_FINANCIAL_STACK_KEYS.map((key, stackIndex) => {
+              const value = Math.max(0, toFiniteNumber(row[key]) || 0);
+              const barHeight = Math.max(value > 0 ? 1 : 0, (value / amountRange) * chartHeight);
+              cursorY -= barHeight;
+              return (
+                <rect
+                  key={key}
+                  x={x}
+                  y={cursorY}
+                  width={barWidth}
+                  height={barHeight}
+                  fill={STOCK_FINANCIAL_STACK_COLORS[stackIndex]}
+                >
+                  <title>{`${row.year} ${key.toUpperCase()}: ${formatAmountWithYi(value)}`}</title>
+                </rect>
+              );
+            })}
+          </g>
+        );
+      })}
+      {linePoints ? <polyline points={linePoints} fill="none" stroke="#e6e866" strokeWidth="2" /> : null}
+      {rows.map((row, index) => {
+        const value = toFiniteNumber(row[mode.growthKey]);
+        if (!Number.isFinite(value)) return null;
+        return (
+          <circle key={`point-${row.year}`} cx={xForIndex(index)} cy={growthY(value)} r="2.6" fill="#f6f09a" stroke="#5475cb" strokeWidth="1.5">
+            <title>{`${row.year} 同比: ${formatDecimalPercent(value)}`}</title>
+          </circle>
+        );
+      })}
+      {rows.map((row, index) => (
+        index % Math.ceil(rows.length / 5) === 0 || index === rows.length - 1
+          ? <text key={`year-${row.year}`} x={xForIndex(index)} y={height - 7} textAnchor="middle">{row.year}</text>
+          : null
+      ))}
+    </svg>
+  );
+}
+
+function formatCompactAmountTick(value) {
+  const number = toFiniteNumber(value);
+  if (!Number.isFinite(number)) return '--';
+  return `${formatYiNumber(number)}`;
+}
+
+function formatGrowthTick(value) {
+  const number = toFiniteNumber(value);
+  if (!Number.isFinite(number)) return '--';
+  return `${Math.round(number)}`;
+}
+
+function formatDecimalPercent(value) {
+  const number = toFiniteNumber(value);
+  if (!Number.isFinite(number)) return '--';
+  return `${(number * 100).toFixed(2)}%`;
 }
 
 function StockEditableCell({ item, column, onSaved }) {
@@ -790,6 +1027,7 @@ function getStockTableCellClass(column) {
   const classes = [];
   if (column.compact) classes.push('is-compact');
   if (column.wide) classes.push('is-wide');
+  if (column.chart) classes.push('is-financial-chart');
   if (column.sticky) classes.push('stock-name-column');
   if (column.format === 'percent') classes.push('is-number');
   if (['amount', 'price', 'ratio', 'score'].includes(column.format)) classes.push('is-number');
@@ -1795,10 +2033,6 @@ function InstrumentDetailPage({
             <SummaryToken label="利润率" value={formatMetricValue(activeFundamentalRow?.profitMargin, 'percent')} />
           </div>
         </section>
-      ) : null}
-
-      {payload?.instrument?.type === 'STOCK' ? (
-        <FinancialBarBoard bars={payload?.fundamentals?.financialBars} />
       ) : null}
 
       {error ? <div className="error-banner">{error}</div> : null}
@@ -3178,68 +3412,6 @@ function SummaryToken({ label, value }) {
   return (
     <span className={emphasized ? 'stock-info-item stock-info-item-emphasized' : 'stock-info-item'}>
       <b>{label}:</b> {value}
-    </span>
-  );
-}
-
-function FinancialBarBoard({ bars }) {
-  const revenueRows = bars?.revenue || [];
-  const profitRows = bars?.profit || [];
-  if (!revenueRows.length && !profitRows.length) return null;
-
-  return (
-    <section className="financial-bar-board">
-      <FinancialBarPanel title="营业收入" rows={revenueRows} tone="revenue" />
-      <FinancialBarPanel title="净利润" rows={profitRows} tone="profit" />
-    </section>
-  );
-}
-
-function FinancialBarPanel({ title, rows, tone }) {
-  const visibleRows = (rows || []).slice(-8);
-  const maxValue = Math.max(
-    1,
-    ...visibleRows.flatMap((row) => [
-      Math.abs(toFiniteNumber(row.total) || 0),
-      Math.abs(toFiniteNumber(row.q1) || 0),
-      Math.abs(toFiniteNumber(row.q2) || 0),
-      Math.abs(toFiniteNumber(row.q3) || 0),
-      Math.abs(toFiniteNumber(row.q4) || 0)
-    ])
-  );
-
-  return (
-    <div className={`financial-bar-panel ${tone}`}>
-      <div className="financial-bar-header">
-        <strong>{title}</strong>
-        <span>年度全部 + Q1/Q2/Q3/Q4</span>
-      </div>
-      <div className="financial-bar-grid">
-        {visibleRows.map((row) => (
-          <div className="financial-year-group" key={row.year}>
-            <div className="financial-bars">
-              <FinancialBar value={row.total} maxValue={maxValue} label="全" />
-              <FinancialBar value={row.q1} maxValue={maxValue} label="1" />
-              <FinancialBar value={row.q2} maxValue={maxValue} label="2" />
-              <FinancialBar value={row.q3} maxValue={maxValue} label="3" />
-              <FinancialBar value={row.q4} maxValue={maxValue} label="4" />
-            </div>
-            <b>{row.year}</b>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function FinancialBar({ value, maxValue, label }) {
-  const number = toFiniteNumber(value);
-  const height = Number.isFinite(number) ? Math.max(4, Math.min(100, (Math.abs(number) / maxValue) * 100)) : 0;
-
-  return (
-    <span className={Number.isFinite(number) && number < 0 ? 'financial-bar is-negative' : 'financial-bar'} title={`${label}: ${formatAmountWithYi(number)}`}>
-      <i style={{ height: `${height}%` }} />
-      <em>{label}</em>
     </span>
   );
 }

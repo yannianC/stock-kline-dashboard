@@ -14,7 +14,7 @@ const port = Number(process.env.API_PORT || 8787);
 const host = process.env.API_HOST || '0.0.0.0';
 const mianaKey = (process.env.MIANA_API_KEY || '').trim();
 const tushareToken = (process.env.TUSHARE_API_TOKEN || process.env.TUSHARE_TOKEN || '').trim();
-const tushareApiUrl = process.env.TUSHARE_API_URL || 'http://api.tushare.pro';
+const tushareApiUrl = process.env.TUSHARE_API_URL || 'https://api.tushare.pro';
 const tqsdkUser = (process.env.TQSDK_USER || '').trim();
 const tqsdkPassword = (process.env.TQSDK_PASSWORD || '').trim();
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -22,6 +22,7 @@ const FULL_HISTORY_START = '1990-01-01T00:00:00';
 const MAX_MINUTE_LOOKBACK_DAYS = 15000;
 const CATALOG_TTL_MS = 30 * 60 * 1000;
 const STOCK_Q1_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const STOCK_Q1_CACHE_VERSION = 2;
 const STOCK_Q1_RANGE_START = '000001';
 const STOCK_Q1_RANGE_END = '002902';
 const CATALOG_DISK_CACHE_PATH = new URL('./catalog-cache.json', import.meta.url);
@@ -252,8 +253,9 @@ app.get('/api/stock-table', async (req, res) => {
     const sortDirection = String(req.query.sortDirection || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
     const filters = parseStockTableFilters(req.query.filters);
     const catalog = await getCatalog();
-    const q1Snapshot = await getStockQ1Snapshot({ catalog }).catch(() => null);
-    const dailyBasicSnapshot = await getTushareDailyBasicSnapshot().catch(() => null);
+    const forceRefresh = String(req.query.force || '') === '1';
+    const q1Snapshot = await getStockQ1Snapshot({ catalog, forceRefresh }).catch(() => null);
+    const dailyBasicSnapshot = await withTimeout(getTushareDailyBasicSnapshot(), 5000).catch(() => null);
     const overrides = readStockTableOverrides();
     const rows = buildStockTableRows({
       catalog,
@@ -288,6 +290,56 @@ app.get('/api/stock-table', async (req, res) => {
   } catch (error) {
     res.status(502).json({
       message: error.message || '股票增强列表获取失败',
+      detail: error.stack
+    });
+  }
+});
+
+app.get('/api/stock-financial-charts', async (req, res) => {
+  try {
+    const codes = String(req.query.codes || '')
+      .split(',')
+      .map((code) => code.trim())
+      .filter(Boolean)
+      .slice(0, 80);
+    const catalog = await getCatalog();
+    const q1Snapshot = await getStockQ1Snapshot({ catalog }).catch(() => null);
+    const instrumentsByCode = new Map(
+      (catalog || [])
+        .filter((item) => item.type === 'STOCK')
+        .map((item) => [item.code, item])
+    );
+
+    const pairs = await mapWithConcurrency(codes, 4, async (code) => {
+      const cached = q1Snapshot?.items?.[code]?.financialCharts;
+      if (cached?.revenue?.length || cached?.profit?.length) {
+        return [code, cached];
+      }
+
+      const instrument = instrumentsByCode.get(code);
+      if (!instrument) return [code, null];
+
+      try {
+        const charts = await withTimeout(
+          loadStockTableIncomeQuarterSeries(instrument).then(({ profitQuarters, revenueQuarters }) => ({
+            revenue: buildStockTableFinancialSeries(revenueQuarters),
+            profit: buildStockTableFinancialSeries(profitQuarters)
+          })),
+          18000
+        );
+        return [code, charts];
+      } catch (_error) {
+        return [code, null];
+      }
+    });
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      items: Object.fromEntries(pairs.filter(([, charts]) => charts))
+    });
+  } catch (error) {
+    res.status(502).json({
+      message: error.message || '股票财报图表获取失败',
       detail: error.stack
     });
   }
@@ -1670,6 +1722,7 @@ async function buildInstrumentDetail(instrument, interval, options = {}) {
   warnings.push(...(fundamentalResult.warnings || []));
 
   return {
+    version: STOCK_Q1_CACHE_VERSION,
     generatedAt: new Date().toISOString(),
     instrument,
     interval: {
@@ -5470,6 +5523,15 @@ function sleep(ms) {
   });
 }
 
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('timeout')), timeoutMs);
+    })
+  ]);
+}
+
 function persistCatalogCache(data) {
   try {
     fs.writeFileSync(CATALOG_DISK_CACHE_PATH, JSON.stringify(data), 'utf8');
@@ -5677,7 +5739,7 @@ function normalizeStockTableEditValue(field, value) {
 
 function buildStockTableRows({ catalog, q1Snapshot, dailyBasicSnapshot, overrides }) {
   return (catalog || [])
-    .filter((item) => item.type === 'STOCK')
+    .filter(isStockQ1TargetInstrument)
     .map((instrument) => buildStockTableRow(instrument, {
       q1Row: q1Snapshot?.items?.[instrument.code] || null,
       dailyBasicRow: getDailyBasicRowForInstrument(dailyBasicSnapshot, instrument),
@@ -5706,6 +5768,7 @@ function buildStockTableRow(instrument, { q1Row, dailyBasicRow, override }) {
     stockPrice: roundMetricValue(stockPrice),
     grossRevenue: roundMetricValue(q1Row?.revenue),
     netProfit: roundMetricValue(q1Row?.profit),
+    financialCharts: q1Row?.financialCharts || null,
     peRatioTtm: roundMetricValue(peRatioTtm),
     pbRatio: roundMetricValue(dailyBasicRow?.pb),
     dividendYield2026: normalizeDailyBasicDividendRate(dailyBasicRow?.dvTtm),
@@ -5732,6 +5795,27 @@ function buildStockTableRow(instrument, { q1Row, dailyBasicRow, override }) {
       instrumentType: 'STOCK'
     }
   };
+}
+
+async function enrichStockTableFinancialCharts(items) {
+  return mapWithConcurrency(items || [], 4, async (item) => {
+    if (item?.financialCharts?.revenue?.length || item?.financialCharts?.profit?.length) {
+      return item;
+    }
+
+    try {
+      const { profitQuarters, revenueQuarters } = await loadQ1IncomeQuarterSeries(item);
+      return {
+        ...item,
+        financialCharts: {
+          revenue: buildStockTableFinancialSeries(revenueQuarters),
+          profit: buildStockTableFinancialSeries(profitQuarters)
+        }
+      };
+    } catch (_error) {
+      return item;
+    }
+  });
 }
 
 function getDailyBasicRowForInstrument(snapshot, instrument) {
@@ -5881,7 +5965,7 @@ function isFreshStockQ1Cache(snapshot) {
 
 async function getStockQ1Snapshot({ catalog = null, forceRefresh = false } = {}) {
   const now = Date.now();
-  if (!forceRefresh && stockQ1SnapshotCache.data && stockQ1SnapshotCache.expiresAt > now) {
+  if (!forceRefresh && isFreshStockQ1Cache(stockQ1SnapshotCache.data) && stockQ1SnapshotCache.expiresAt > now) {
     return stockQ1SnapshotCache.data;
   }
 
@@ -5889,7 +5973,9 @@ async function getStockQ1Snapshot({ catalog = null, forceRefresh = false } = {})
     const diskCache = readStockQ1CacheFromDisk();
     if (diskCache?.items && Object.keys(diskCache.items).length) {
       stockQ1SnapshotCache.data = diskCache;
-      stockQ1SnapshotCache.expiresAt = now + STOCK_Q1_CACHE_TTL_MS;
+      stockQ1SnapshotCache.expiresAt = isFreshStockQ1Cache(diskCache)
+        ? now + STOCK_Q1_CACHE_TTL_MS
+        : now + 30 * 60 * 1000;
       return diskCache;
     }
   }
@@ -6013,8 +6099,88 @@ async function buildStockQ1SnapshotRow(instrument) {
     revenue: roundMetricValue(latestRevenueRow?.value),
     profitGrowthRate: calculateSnapshotGrowthRate(latestProfitRow.value, previousProfitRow?.value),
     revenueGrowthRate: calculateSnapshotGrowthRate(latestRevenueRow?.value, previousRevenueRow?.value),
+    financialCharts: {
+      revenue: buildStockTableFinancialSeries(revenueQuarters),
+      profit: buildStockTableFinancialSeries(profitQuarters)
+    },
     source
   };
+}
+
+function buildStockTableFinancialSeries(quarters) {
+  const byYear = new Map();
+
+  for (const row of quarters || []) {
+    const reportDate = normalizeDate(row.reportDate);
+    const value = toFiniteNumber(row.value);
+    const quarterIndex = getQuarterIndex(reportDate);
+    if (!reportDate || !quarterIndex || !Number.isFinite(value)) continue;
+
+    const year = reportDate.slice(0, 4);
+    if (!byYear.has(year)) {
+      byYear.set(year, {
+        year,
+        q1: 0,
+        q2: 0,
+        q3: 0,
+        q4: 0
+      });
+    }
+
+    byYear.get(year)[`q${quarterIndex}`] = value;
+  }
+
+  const rows = [...byYear.values()]
+    .sort((left, right) => left.year.localeCompare(right.year))
+    .map((row) => {
+      const q1 = toFiniteNumber(row.q1) || 0;
+      const q2 = toFiniteNumber(row.q2) || 0;
+      const q3 = toFiniteNumber(row.q3) || 0;
+      const q4 = toFiniteNumber(row.q4) || 0;
+      return {
+        year: row.year,
+        q1,
+        q2,
+        q3,
+        q4,
+        midR: q1 + q2,
+        q3R: q1 + q2 + q3,
+        total: q1 + q2 + q3 + q4
+      };
+    });
+
+  let previous = null;
+  return rows.map((row) => {
+    const enriched = {
+      ...row,
+      gr: calculateSnapshotGrowthRate(row.total, previous?.total) ?? 0,
+      q1Gr: calculateSnapshotGrowthRate(row.q1, previous?.q1) ?? 0,
+      q2Gr: calculateSnapshotGrowthRate(row.q2, previous?.q2) ?? 0,
+      q3Gr: calculateSnapshotGrowthRate(row.q3, previous?.q3) ?? 0,
+      q4Gr: calculateSnapshotGrowthRate(row.q4, previous?.q4) ?? 0,
+      midRGr: calculateSnapshotGrowthRate(row.midR, previous?.midR) ?? 0,
+      q3RGr: calculateSnapshotGrowthRate(row.q3R, previous?.q3R) ?? 0
+    };
+    previous = row;
+
+    return {
+      year: enriched.year,
+      q1: roundMetricValue(enriched.q1),
+      q2: roundMetricValue(enriched.q2),
+      q3: roundMetricValue(enriched.q3),
+      q4: roundMetricValue(enriched.q4),
+      midR: roundMetricValue(enriched.midR),
+      q3R: roundMetricValue(enriched.q3R),
+      total: roundMetricValue(enriched.total),
+      gr: roundMetricValue(enriched.gr),
+      q1Gr: roundMetricValue(enriched.q1Gr),
+      q2Gr: roundMetricValue(enriched.q2Gr),
+      q3Gr: roundMetricValue(enriched.q3Gr),
+      q4Gr: roundMetricValue(enriched.q4Gr),
+      midRGr: roundMetricValue(enriched.midRGr),
+      q3RGr: roundMetricValue(enriched.q3RGr)
+    };
+  });
 }
 
 async function loadQ1IncomeQuarterSeries(instrument) {
@@ -6063,6 +6229,59 @@ async function loadQ1IncomeQuarterSeries(instrument) {
       fallbackFieldCandidates: [],
       label: '营业收入'
     }),
+    source: 'miana'
+  };
+}
+
+async function loadStockTableIncomeQuarterSeries(instrument) {
+  const symbol = instrument.symbol;
+  let tushareIncomeRows = [];
+  if (canUseTushareFinancials(instrument)) {
+    tushareIncomeRows = await getTushareIncomeSheet(symbol).catch(() => []);
+  }
+
+  const tushareProfitQuarters = buildQuarterMetricSeries({
+    primaryRows: tushareIncomeRows,
+    fallbackRows: [],
+    primaryFieldCandidates: ['netIncomeAttr_p', 'netIncome'],
+    fallbackFieldCandidates: [],
+    label: '利润'
+  });
+  const tushareRevenueQuarters = buildQuarterMetricSeries({
+    primaryRows: tushareIncomeRows,
+    fallbackRows: [],
+    primaryFieldCandidates: ['totalRevenue', 'revenue'],
+    fallbackFieldCandidates: [],
+    label: '营业收入'
+  });
+
+  if (tushareProfitQuarters.length || tushareRevenueQuarters.length) {
+    return {
+      profitQuarters: tushareProfitQuarters,
+      revenueQuarters: tushareRevenueQuarters,
+      source: 'tushare'
+    };
+  }
+
+  const mianaIncomeRows = await getStockIncomeSheet(symbol).catch(() => []);
+  const mianaProfitQuarters = buildQuarterMetricSeries({
+    primaryRows: mianaIncomeRows,
+    fallbackRows: [],
+    primaryFieldCandidates: ['netIncomeAttr_p', 'netIncome'],
+    fallbackFieldCandidates: [],
+    label: '利润'
+  });
+  const mianaRevenueQuarters = buildQuarterMetricSeries({
+    primaryRows: mianaIncomeRows,
+    fallbackRows: [],
+    primaryFieldCandidates: ['totalRevenue', 'revenue'],
+    fallbackFieldCandidates: [],
+    label: '营业收入'
+  });
+
+  return {
+    profitQuarters: mianaProfitQuarters,
+    revenueQuarters: mianaRevenueQuarters,
     source: 'miana'
   };
 }

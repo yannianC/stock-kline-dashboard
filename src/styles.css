@@ -664,107 +664,6 @@ button {
   color: #b45309;
 }
 
-.financial-bar-board {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.financial-bar-panel {
-  min-width: 0;
-  padding: 12px 14px;
-  border: 1px solid #d7dccf;
-  border-radius: 8px;
-  background: #fbfcf8;
-}
-
-.financial-bar-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.financial-bar-header strong {
-  color: #243039;
-  font-size: 15px;
-}
-
-.financial-bar-header span {
-  color: #687174;
-  font-size: 12px;
-}
-
-.financial-bar-grid {
-  min-height: 150px;
-  display: flex;
-  align-items: stretch;
-  gap: 10px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-
-.financial-year-group {
-  min-width: 88px;
-  display: grid;
-  grid-template-rows: minmax(118px, 1fr) auto;
-  gap: 6px;
-  color: #536068;
-  font-size: 11px;
-  text-align: center;
-}
-
-.financial-year-group > b {
-  font-weight: 700;
-}
-
-.financial-bars {
-  display: grid;
-  grid-template-columns: 1.3fr repeat(4, 1fr);
-  align-items: end;
-  gap: 4px;
-  padding: 8px 6px 2px;
-  border-radius: 7px;
-  background: #f0f4eb;
-}
-
-.financial-bar {
-  height: 112px;
-  display: grid;
-  grid-template-rows: 1fr auto;
-  align-items: end;
-  gap: 3px;
-}
-
-.financial-bar i {
-  width: 100%;
-  min-height: 0;
-  display: block;
-  align-self: end;
-  border-radius: 4px 4px 2px 2px;
-  background: #147164;
-}
-
-.financial-bar em {
-  color: #6a7478;
-  font-size: 10px;
-  font-style: normal;
-  line-height: 1;
-}
-
-.financial-bar.is-negative i {
-  background: #cf3f35;
-}
-
-.financial-bar-panel.profit .financial-bar i {
-  background: #8b5cf6;
-}
-
-.financial-bar-panel.profit .financial-bar.is-negative i {
-  background: #cf3f35;
-}
-
 .metric-toggle {
   border-color: color-mix(in srgb, var(--metric-color, #147164) 22%, #cbd3c2);
 }
@@ -908,6 +807,74 @@ button {
 
 .stock-data-table td.is-wide {
   min-width: 220px;
+}
+
+.stock-data-table td.is-financial-chart {
+  min-width: 360px;
+  padding: 10px 12px;
+  vertical-align: top;
+}
+
+.stock-financial-cell {
+  display: grid;
+  gap: 8px;
+  min-width: 336px;
+}
+
+.stock-financial-loading {
+  min-width: 140px;
+  display: grid;
+  gap: 4px;
+  color: #617074;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-financial-loading b {
+  color: #233039;
+  font-weight: 600;
+}
+
+.stock-financial-loading small {
+  color: #8a9295;
+  font-size: 11px;
+}
+
+.stock-financial-mode-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.stock-financial-mode-grid button {
+  min-width: 62px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid #cbd3c2;
+  border-radius: 6px;
+  color: #28343c;
+  background: #ffffff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.stock-financial-mode-grid button.is-active {
+  border-color: #ef4444;
+  color: #ef4444;
+  background: #fffafa;
+}
+
+.stock-financial-chart {
+  width: 330px;
+  height: 158px;
+  display: block;
+  color: #68717a;
+  font-size: 10px;
+  overflow: visible;
+}
+
+.stock-financial-chart text {
+  fill: currentColor;
+  font-variant-numeric: tabular-nums;
 }
 
 .table-sort-button {
@@ -1716,10 +1683,6 @@ button {
 
   .stock-info-board {
     padding: 10px 12px;
-  }
-
-  .financial-bar-board {
-    grid-template-columns: 1fr;
   }
 
   .compare-modal-grid {

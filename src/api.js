@@ -122,6 +122,12 @@ export function loadStockTable({
   }, { force });
 }
 
+export function loadStockFinancialCharts({ codes = [] } = {}) {
+  return requestJson('api/stock-financial-charts', {
+    codes: codes.join(',')
+  });
+}
+
 export async function saveStockTableCell({ id, code, field, value }) {
   const response = await fetch('api/stock-table/edit', {
     method: 'POST',
