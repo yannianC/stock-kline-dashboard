@@ -1689,7 +1689,8 @@ async function buildInstrumentDetail(instrument, interval, options = {}) {
     fundamentals: {
       current: fundamentalResult.current,
       rows: fundamentalResult.rows,
-      metrics: fundamentalResult.metrics
+      metrics: fundamentalResult.metrics,
+      financialBars: fundamentalResult.financialBars
     },
     series: {
       raw,
@@ -4155,8 +4156,46 @@ async function buildStockFundamentals(instrument, candles, latestQuote) {
     current,
     rows,
     metrics: STOCK_FUNDAMENTAL_METRICS,
+    financialBars: {
+      revenue: buildFinancialStatementBars(revenueQuarters),
+      profit: buildFinancialStatementBars(profitQuarters)
+    },
     warnings
   };
+}
+
+function buildFinancialStatementBars(quarters) {
+  const byYear = new Map();
+
+  for (const row of quarters || []) {
+    const reportDate = normalizeDate(row.reportDate);
+    const value = toFiniteNumber(row.value);
+    const quarterIndex = getQuarterIndex(reportDate);
+    if (!reportDate || !quarterIndex || !Number.isFinite(value)) continue;
+
+    const year = reportDate.slice(0, 4);
+    if (!byYear.has(year)) {
+      byYear.set(year, {
+        year,
+        total: 0,
+        q1: null,
+        q2: null,
+        q3: null,
+        q4: null
+      });
+    }
+
+    const item = byYear.get(year);
+    item[`q${quarterIndex}`] = roundMetricValue(value);
+    item.total += value;
+  }
+
+  return [...byYear.values()]
+    .map((item) => ({
+      ...item,
+      total: roundMetricValue(item.total)
+    }))
+    .sort((left, right) => left.year.localeCompare(right.year));
 }
 
 function enrichCurrentStockFundamentalRow(row, latestQuote) {

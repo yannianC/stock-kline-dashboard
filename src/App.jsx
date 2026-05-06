@@ -1797,6 +1797,10 @@ function InstrumentDetailPage({
         </section>
       ) : null}
 
+      {payload?.instrument?.type === 'STOCK' ? (
+        <FinancialBarBoard bars={payload?.fundamentals?.financialBars} />
+      ) : null}
+
       {error ? <div className="error-banner">{error}</div> : null}
 
       <section className="chart-region">
@@ -3174,6 +3178,68 @@ function SummaryToken({ label, value }) {
   return (
     <span className={emphasized ? 'stock-info-item stock-info-item-emphasized' : 'stock-info-item'}>
       <b>{label}:</b> {value}
+    </span>
+  );
+}
+
+function FinancialBarBoard({ bars }) {
+  const revenueRows = bars?.revenue || [];
+  const profitRows = bars?.profit || [];
+  if (!revenueRows.length && !profitRows.length) return null;
+
+  return (
+    <section className="financial-bar-board">
+      <FinancialBarPanel title="营业收入" rows={revenueRows} tone="revenue" />
+      <FinancialBarPanel title="净利润" rows={profitRows} tone="profit" />
+    </section>
+  );
+}
+
+function FinancialBarPanel({ title, rows, tone }) {
+  const visibleRows = (rows || []).slice(-8);
+  const maxValue = Math.max(
+    1,
+    ...visibleRows.flatMap((row) => [
+      Math.abs(toFiniteNumber(row.total) || 0),
+      Math.abs(toFiniteNumber(row.q1) || 0),
+      Math.abs(toFiniteNumber(row.q2) || 0),
+      Math.abs(toFiniteNumber(row.q3) || 0),
+      Math.abs(toFiniteNumber(row.q4) || 0)
+    ])
+  );
+
+  return (
+    <div className={`financial-bar-panel ${tone}`}>
+      <div className="financial-bar-header">
+        <strong>{title}</strong>
+        <span>年度全部 + Q1/Q2/Q3/Q4</span>
+      </div>
+      <div className="financial-bar-grid">
+        {visibleRows.map((row) => (
+          <div className="financial-year-group" key={row.year}>
+            <div className="financial-bars">
+              <FinancialBar value={row.total} maxValue={maxValue} label="全" />
+              <FinancialBar value={row.q1} maxValue={maxValue} label="1" />
+              <FinancialBar value={row.q2} maxValue={maxValue} label="2" />
+              <FinancialBar value={row.q3} maxValue={maxValue} label="3" />
+              <FinancialBar value={row.q4} maxValue={maxValue} label="4" />
+            </div>
+            <b>{row.year}</b>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FinancialBar({ value, maxValue, label }) {
+  const number = toFiniteNumber(value);
+  const height = Number.isFinite(number) ? Math.max(4, Math.min(100, (Math.abs(number) / maxValue) * 100)) : 0;
+
+  return (
+    <span className={Number.isFinite(number) && number < 0 ? 'financial-bar is-negative' : 'financial-bar'} title={`${label}: ${formatAmountWithYi(number)}`}>
+      <i style={{ height: `${height}%` }} />
+      <em>{label}</em>
     </span>
   );
 }
