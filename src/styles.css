@@ -782,6 +782,7 @@ button {
 .stock-data-table th,
 .stock-data-table td {
   padding: 9px 10px;
+  text-align: center;
   vertical-align: middle;
 }
 
@@ -795,7 +796,7 @@ button {
 }
 
 .stock-data-table td.is-number {
-  text-align: right;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
@@ -950,13 +951,13 @@ button {
   width: 100%;
   display: inline-flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 5px;
   border: 0;
   color: inherit;
   background: transparent;
   font: inherit;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -1028,18 +1029,18 @@ button {
 
 .stock-name-cell {
   display: grid;
+  justify-items: center;
   gap: 3px;
 }
 
 .stock-name-link {
-  width: fit-content;
   padding: 0;
   border: 0;
   color: #20303a;
   background: transparent;
   font-size: 13px;
   font-weight: 700;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -1067,6 +1068,7 @@ button {
   color: #1f2933;
   background: #ffffff;
   font-size: 12px;
+  text-align: center;
 }
 
 .stock-edit-input.is-wide {
