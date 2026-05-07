@@ -13,12 +13,14 @@ const app = express();
 const port = Number(process.env.API_PORT || 8787);
 const host = process.env.API_HOST || '0.0.0.0';
 const mianaKey = (process.env.MIANA_API_KEY || '').trim();
+const databentoKey = (process.env.DATABENTO_API_KEY || process.env.DATABENTO_KEY || '').trim();
 const tushareToken = (process.env.TUSHARE_API_TOKEN || process.env.TUSHARE_TOKEN || '').trim();
 const tushareApiUrl = process.env.TUSHARE_API_URL || 'https://api.tushare.pro';
 const tqsdkUser = (process.env.TQSDK_USER || '').trim();
 const tqsdkPassword = (process.env.TQSDK_PASSWORD || '').trim();
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FULL_HISTORY_START = '1990-01-01T00:00:00';
+const DATABENTO_HISTORICAL_URL = 'https://hist.databento.com';
 const MAX_MINUTE_LOOKBACK_DAYS = 15000;
 const CATALOG_TTL_MS = 30 * 60 * 1000;
 const STOCK_Q1_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -37,6 +39,19 @@ const BINANCE_HOSTS = [
   'https://api.binance.com',
   'https://api.binance.us'
 ];
+const DATABENTO_US_FUTURE_DATASETS = {
+  CME: 'GLBX.MDP3',
+  CBOT: 'GLBX.MDP3',
+  NYMEX: 'GLBX.MDP3',
+  COMEX: 'GLBX.MDP3',
+  XCME: 'GLBX.MDP3',
+  XCBT: 'GLBX.MDP3',
+  XNYM: 'GLBX.MDP3',
+  XCEC: 'GLBX.MDP3',
+  NYBOT: 'IFUS.IMPACT',
+  IFUS: 'IFUS.IMPACT',
+  ICEUS: 'IFUS.IMPACT'
+};
 
 if (!mianaKey) {
   console.warn('[config] MIANA_API_KEY is not set; Miana-backed endpoints will fail until it is configured.');
@@ -159,6 +174,7 @@ const tushareBpsCache = new Map();
 const tqFutureFamilyCache = new Map();
 const instrumentDetailCache = new Map();
 const compareDetailCache = new Map();
+const databentoDefinitionCache = new Map();
 const tushareDailyBasicSnapshotCache = {
   expiresAt: 0,
   data: null,
@@ -1839,6 +1855,30 @@ async function fetchDirectFutureCandles(instrument, interval) {
     return fetchTqSdkDomesticFutureCandles(instrument, interval);
   }
 
+  if (isDatabentoUsFutureInstrument(instrument)) {
+    try {
+      return await fetchDatabentoFutureCandles(instrument, interval);
+    } catch (error) {
+      const fallback = await fetchMianaGenericCandles(instrument, interval, {
+        endpoint: '/api/future/v2/kline',
+        marketTimeZone: getFutureMarketTimeZone(instrument)
+      }).catch(() => null);
+
+      if (fallback) {
+        return {
+          ...fallback,
+          sourceName: `${fallback.sourceName}（Databento 回退）`,
+          warnings: [
+            `Databento ${instrument.code} ${interval.label} 获取失败，暂用 Miana 回退：${error?.message || '未知错误'}`,
+            ...(fallback.warnings || [])
+          ]
+        };
+      }
+
+      throw error;
+    }
+  }
+
   return fetchMianaGenericCandles(instrument, interval, {
     endpoint: '/api/future/v2/kline',
     marketTimeZone: getFutureMarketTimeZone(instrument)
@@ -1848,6 +1888,10 @@ async function fetchDirectFutureCandles(instrument, interval) {
 async function fetchFutureContractDailyCandles(instrument) {
   if (isTqSdkDomesticFutureInstrument(instrument)) {
     return fetchTqSdkDomesticFutureCandles(instrument, CHART_INTERVALS.day);
+  }
+
+  if (isDatabentoUsFutureInstrument(instrument)) {
+    return fetchDatabentoFutureCandles(instrument, CHART_INTERVALS.day);
   }
 
   const { start, end } = getFutureContractDateRange(instrument);
@@ -1893,6 +1937,671 @@ async function fetchTqSdkDomesticFutureCandles(instrument, interval) {
     sourceName: `TqSdk 国内期货 ${instrument.code} ${interval.label}`,
     warnings: []
   };
+}
+
+function isDatabentoUsFutureInstrument(instrument) {
+  return Boolean(
+    databentoKey &&
+    instrument?.type === 'FUTURE' &&
+    instrument?.countryCode === 'USA' &&
+    getDatabentoFutureDataset(instrument)
+  );
+}
+
+function getDatabentoFutureDataset(instrument) {
+  const exchangeCode = String(instrument?.exchangeCode || '').trim().toUpperCase();
+  return DATABENTO_US_FUTURE_DATASETS[exchangeCode] || null;
+}
+
+function getDatabentoFutureRoot(instrument) {
+  const familyRoot = String(instrument?.futureMeta?.familyRoot || '').trim().toUpperCase();
+  if (familyRoot) return familyRoot;
+
+  const code = String(instrument?.code || instrument?.symbol || '').trim().toUpperCase();
+  const appCodeMatch = code.match(/^([A-Z0-9]+?)(\d{2})([FGHJKMNQUVXZ])$/);
+  if (appCodeMatch) return appCodeMatch[1];
+
+  const rawCodeMatch = code.match(/^([A-Z0-9]+?)([FGHJKMNQUVXZ])(\d)$/);
+  if (rawCodeMatch) return rawCodeMatch[1];
+
+  return code.replace(/00Y$/i, '').replace(/_M$/i, '');
+}
+
+function getDatabentoFutureSymbolSpec(instrument) {
+  const dataset = getDatabentoFutureDataset(instrument);
+  if (!dataset) {
+    throw new Error(`${instrument?.exchangeCode || instrument?.code} 暂未配置 Databento 数据集映射`);
+  }
+
+  const root = getDatabentoFutureRoot(instrument);
+  if (!root) {
+    throw new Error(`无法识别 Databento 期货根代码：${instrument?.code || '--'}`);
+  }
+
+  if (instrument?.futureMeta?.isMainLike) {
+    return {
+      dataset,
+      root,
+      symbol: `${root}.v.0`,
+      stypeIn: 'continuous',
+      description: `${root}.v.0`
+    };
+  }
+
+  const rawSymbol = getDatabentoRawContractSymbol(instrument, root);
+  return {
+    dataset,
+    root,
+    symbol: rawSymbol,
+    stypeIn: 'raw_symbol',
+    description: rawSymbol
+  };
+}
+
+function getDatabentoRawContractSymbol(instrument, fallbackRoot = null) {
+  const code = String(instrument?.code || instrument?.symbol || '').trim().toUpperCase();
+  const rawCodeMatch = code.match(/^([A-Z0-9]+?)([FGHJKMNQUVXZ])(\d)$/);
+  if (rawCodeMatch) return code;
+
+  const appCodeMatch = code.match(/^([A-Z0-9]+?)(\d{2})([FGHJKMNQUVXZ])$/);
+  if (appCodeMatch) {
+    const [, root, yy, monthCode] = appCodeMatch;
+    return `${root}${monthCode}${yy.slice(-1)}`;
+  }
+
+  const root = fallbackRoot || getDatabentoFutureRoot(instrument);
+  const expiryKey = String(instrument?.futureMeta?.expiryKey || '');
+  const expiryMatch = expiryKey.match(/^(\d{4})(\d{2})$/);
+  if (root && expiryMatch) {
+    const monthCode = getFutureMonthCodeFromMonth(expiryMatch[2]);
+    if (monthCode) return `${root}${monthCode}${expiryMatch[1].slice(-1)}`;
+  }
+
+  return code;
+}
+
+function getFutureMonthCodeFromMonth(month) {
+  const monthText = String(month || '').padStart(2, '0');
+  return Object.entries(FUTURE_MONTH_CODE_MAP).find(([, value]) => value === monthText)?.[0] || null;
+}
+
+function getDatabentoSchemaSpec(interval) {
+  if (interval.key === '1m') {
+    return { schema: 'ohlcv-1m', intraday: true, aggregateSeconds: null };
+  }
+  if (interval.key === '15m') {
+    return { schema: 'ohlcv-1m', intraday: true, aggregateSeconds: 15 * 60 };
+  }
+  if (interval.key === '1h') {
+    return { schema: 'ohlcv-1h', intraday: true, aggregateSeconds: null };
+  }
+  if (interval.key === '4h') {
+    return { schema: 'ohlcv-1h', intraday: true, aggregateSeconds: 4 * 60 * 60 };
+  }
+  return { schema: 'ohlcv-1d', intraday: false, aggregateSeconds: null };
+}
+
+function getDatabentoDateRange(instrument, interval, { startOverride = null, endOverride = null } = {}) {
+  if (startOverride && endOverride) {
+    return {
+      start: startOverride,
+      end: endOverride
+    };
+  }
+
+  const end = endOverride || new Date();
+  if (interval.intraday) {
+    const start = new Date(end);
+    start.setDate(start.getDate() - getDatabentoIntradayLookbackDays(interval));
+    return { start, end };
+  }
+
+  if (instrument?.futureMeta?.isMainLike) {
+    const start = new Date(end);
+    start.setDate(start.getDate() - 30);
+    return {
+      start,
+      end
+    };
+  }
+
+  return getFutureContractDateRange(instrument);
+}
+
+function getDatabentoIntradayLookbackDays(interval) {
+  if (interval.key === '1m') return 7;
+  if (interval.key === '15m') return 60;
+  if (interval.key === '1h' || interval.key === '4h') return 730;
+  return 730;
+}
+
+async function fetchDatabentoFutureCandles(instrument, interval, options = {}) {
+  const loaded = await loadDatabentoOhlcvCandles(instrument, interval, options);
+  return {
+    candles: loaded.candles,
+    sourceName: `Databento ${loaded.spec.dataset} ${loaded.spec.description} ${interval.label}`,
+    warnings: loaded.warnings
+  };
+}
+
+async function fetchDatabentoContinuousFutureCandles(instrument, interval) {
+  const loaded = await loadDatabentoOhlcvCandles(instrument, interval, { skipCalendarAggregation: true });
+  const warnings = [
+    `美国期货主连使用 Databento volume front-month 连续合约 ${loaded.spec.description}，价格为未回调的原始价格。`,
+    ...loaded.warnings
+  ];
+
+  let definitionById = new Map();
+  if (process.env.DATABENTO_ENABLE_CONTINUOUS_DEFINITIONS === '1') {
+    try {
+      const definitionStart = getDatabentoDefinitionStart(loaded.range.start, loaded.range.end);
+      definitionById = await fetchDatabentoContinuousDefinitions(instrument, definitionStart, loaded.range.end, {
+        timeoutMs: 4_000
+      });
+    } catch (error) {
+      warnings.push(`Databento 主连合约定义获取失败，换季标记可能不完整：${error?.message || '未知错误'}`);
+    }
+  } else {
+    warnings.push('Databento 主连合约定义暂不随页面同步加载，因此美国主连当前只显示连续K线，不显示换季标记。');
+  }
+
+  const taggedCandles = attachDatabentoContractInfo(loaded.candles, definitionById, instrument);
+  const rolloverEvents = buildDatabentoContinuousRolloverEvents(taggedCandles, definitionById, instrument);
+  let rawCandles = taggedCandles;
+
+  if (interval.key === 'week' || interval.key === 'month') {
+    rawCandles = aggregateCalendarCandles(rawCandles, interval.key);
+  }
+
+  const historyGaps = findFutureHistoryGaps(rawCandles);
+  if (historyGaps.length) {
+    const largestGap = historyGaps.reduce((largest, item) => (item.days > largest.days ? item : largest), historyGaps[0]);
+    warnings.push(
+      `${instrument.code} 的 Databento 主连历史存在 ${historyGaps.length} 段缺口；最大缺口 ${largestGap.from} -> ${largestGap.to}，相隔 ${largestGap.days} 天。`
+    );
+  }
+
+  const enrichedRollovers = enrichDatabentoContinuousRolloverEvents(rolloverEvents, interval, rawCandles);
+  const rolloverContextByDate = mergeFutureRolloverContexts(new Map(), enrichedRollovers);
+  rawCandles = attachFutureRolloverContexts(rawCandles, rolloverContextByDate);
+
+  return {
+    candles: rawCandles,
+    sourceName: `Databento ${loaded.spec.dataset} ${loaded.spec.description} ${interval.label}`,
+    warnings,
+    rollovers: enrichedRollovers
+  };
+}
+
+function getDatabentoDefinitionStart(start, end) {
+  const endDate = end instanceof Date ? end : new Date(end);
+  if (!Number.isFinite(endDate.getTime())) return start;
+
+  const limitedStart = new Date(endDate);
+  limitedStart.setUTCDate(limitedStart.getUTCDate() - 220);
+
+  const startDate = start instanceof Date ? start : new Date(start);
+  if (!Number.isFinite(startDate.getTime()) || startDate > limitedStart) {
+    return start;
+  }
+
+  return limitedStart;
+}
+
+async function loadDatabentoOhlcvCandles(instrument, interval, options = {}) {
+  const spec = getDatabentoFutureSymbolSpec(instrument);
+  const schemaSpec = getDatabentoSchemaSpec(interval);
+  const range = getDatabentoDateRange(instrument, interval, options);
+  const records = await fetchDatabentoTimeseriesInChunks({
+    dataset: spec.dataset,
+    symbols: spec.symbol,
+    schema: schemaSpec.schema,
+    stype_in: spec.stypeIn,
+    map_symbols: spec.stypeIn === 'continuous' ? 'false' : 'true',
+    start: formatDatabentoDateTime(range.start),
+    end: formatDatabentoDateTime(range.end)
+  }, {
+    timeoutMs: options.timeoutMs || 45_000,
+    retries: options.retries || 2
+  });
+
+  let candles = normalizeDatabentoOhlcvRecords(records, { intraday: schemaSpec.intraday });
+  const warnings = [];
+
+  if (schemaSpec.aggregateSeconds) {
+    candles = aggregateCandles(candles, schemaSpec.aggregateSeconds);
+    warnings.push(`${interval.label} 由 Databento ${schemaSpec.schema} 聚合生成。`);
+  }
+
+  if ((interval.key === 'week' || interval.key === 'month') && !options.skipCalendarAggregation) {
+    candles = aggregateCalendarCandles(candles, interval.key);
+  }
+
+  return {
+    candles,
+    spec,
+    range,
+    warnings
+  };
+}
+
+async function fetchDatabentoContinuousDefinitions(instrument, start, end, options = {}) {
+  const spec = getDatabentoFutureSymbolSpec(instrument);
+  const cacheKey = `${spec.dataset}:${spec.symbol}:${formatDatabentoDateTime(start)}:${formatDatabentoDateTime(end)}:definitions`;
+  const cached = databentoDefinitionCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
+  const records = await fetchDatabentoTimeseriesInChunks({
+    dataset: spec.dataset,
+    symbols: spec.symbol,
+    schema: 'definition',
+    stype_in: spec.stypeIn,
+    map_symbols: 'false',
+    start: formatDatabentoDateTime(start),
+    end: formatDatabentoDateTime(end)
+  }, {
+    timeoutMs: options.timeoutMs || 45_000,
+    retries: options.retries || 1
+  });
+
+  const definitionById = new Map();
+  for (const row of records) {
+    const instrumentId = toFiniteNumber(row?.hd?.instrument_id ?? row?.instrument_id ?? row?.raw_instrument_id);
+    const rawSymbol = String(row?.raw_symbol || '').trim().toUpperCase();
+    if (!Number.isFinite(instrumentId) || !rawSymbol || row.instrument_class !== 'F') continue;
+
+    definitionById.set(instrumentId, {
+      instrumentId,
+      rawSymbol,
+      expiration: row.expiration || null,
+      maturityYear: toFiniteNumber(row.maturity_year),
+      maturityMonth: toFiniteNumber(row.maturity_month),
+      exchange: row.exchange || '',
+      currency: row.currency || ''
+    });
+  }
+
+  databentoDefinitionCache.set(cacheKey, {
+    expiresAt: Date.now() + 30 * 60 * 1000,
+    data: definitionById
+  });
+
+  return definitionById;
+}
+
+function attachDatabentoContractInfo(candles, definitionById, parentInstrument) {
+  return (candles || []).map((candle) => {
+    const definition = definitionById.get(candle.databentoInstrumentId);
+    if (!definition) return candle;
+
+    const contract = createDatabentoContractInstrument(parentInstrument, definition, candleDateKey(candle.time));
+    return {
+      ...candle,
+      contractCode: contract.code,
+      contractName: contract.name,
+      contractExpiry: contract.futureMeta?.expiryLabel || null
+    };
+  });
+}
+
+function buildDatabentoContinuousRolloverEvents(candles, definitionById, parentInstrument) {
+  const events = [];
+  let previous = null;
+
+  for (const candle of candles || []) {
+    if (!previous) {
+      previous = candle;
+      continue;
+    }
+
+    if (candle.databentoInstrumentId === previous.databentoInstrumentId) {
+      previous = candle;
+      continue;
+    }
+
+    const tradeDate = normalizeDate(candle.tradeDate || candleDateKey(candle.time));
+    const fromDefinition = definitionById.get(previous.databentoInstrumentId);
+    const toDefinition = definitionById.get(candle.databentoInstrumentId);
+    if (!fromDefinition || !toDefinition) {
+      previous = candle;
+      continue;
+    }
+
+    const fromInstrument = createDatabentoContractInstrument(parentInstrument, fromDefinition, candleDateKey(previous.time));
+    const toInstrument = createDatabentoContractInstrument(parentInstrument, toDefinition, tradeDate);
+
+    events.push({
+      switchDate: tradeDate,
+      reason: 'databento-volume-front-month',
+      fromInstrument,
+      toInstrument,
+      fromExpiry: fromInstrument.futureMeta?.expiryLabel || null,
+      toExpiry: toInstrument.futureMeta?.expiryLabel || null,
+      fromMonthLabel: formatFutureMonthLabel(fromInstrument.futureMeta?.expiryMonth, fromInstrument.futureMeta?.expiryLabel),
+      toMonthLabel: formatFutureMonthLabel(toInstrument.futureMeta?.expiryMonth, toInstrument.futureMeta?.expiryLabel),
+      fromVolume: toFiniteNumber(previous.volume) || 0,
+      toVolume: toFiniteNumber(candle.volume) || 0,
+      fromPrice: toFiniteNumber(previous.close),
+      toPrice: toFiniteNumber(candle.close),
+      fromDailyMid: getDailyMidpoint(previous),
+      toDailyMid: getDailyMidpoint(candle)
+    });
+
+    previous = candle;
+  }
+
+  return events;
+}
+
+function enrichDatabentoContinuousRolloverEvents(events, interval, displayCandles) {
+  return (events || [])
+    .map((event) => {
+      const markerTime = resolveFutureRolloverMarkerTime(event.switchDate, interval, displayCandles);
+      const premium = Number.isFinite(event.fromDailyMid) && Number.isFinite(event.toDailyMid)
+        ? event.toDailyMid - event.fromDailyMid
+        : null;
+
+      return {
+        date: event.switchDate,
+        markerTime,
+        fromCode: event.fromInstrument.code,
+        toCode: event.toInstrument.code,
+        fromName: event.fromInstrument.name,
+        toName: event.toInstrument.name,
+        fromExpiry: event.fromExpiry,
+        toExpiry: event.toExpiry,
+        fromMonthLabel: event.fromMonthLabel,
+        toMonthLabel: event.toMonthLabel,
+        fromVolume: event.fromVolume,
+        toVolume: event.toVolume,
+        fromPrice: event.fromPrice,
+        toPrice: event.toPrice,
+        fromAveragePrice: event.fromDailyMid,
+        toAveragePrice: event.toDailyMid,
+        reason: event.reason,
+        isSwitch: true,
+        premium,
+        premiumRate: Number.isFinite(premium) && Number.isFinite(event.fromDailyMid) && event.fromDailyMid !== 0
+          ? (premium / event.fromDailyMid) * 100
+          : null,
+        premiumSource: 'databento-daily-midpoint',
+        markerText: `${event.fromMonthLabel}→${event.toMonthLabel}`
+      };
+    })
+    .filter((item) => item.markerTime != null);
+}
+
+function createDatabentoContractInstrument(parentInstrument, definition, fallbackDate = null) {
+  const rawSymbol = String(definition?.rawSymbol || parentInstrument?.code || '').trim().toUpperCase();
+  const futureMeta = buildDatabentoFutureMeta(parentInstrument, definition, fallbackDate);
+  const displayName = rawSymbol
+    ? `${parentInstrument?.name || parentInstrument?.displayName || futureMeta.familyRoot} ${rawSymbol}`
+    : (parentInstrument?.name || parentInstrument?.displayName || parentInstrument?.code);
+
+  return {
+    ...parentInstrument,
+    id: `FUTURE:${rawSymbol || parentInstrument?.code}`,
+    code: rawSymbol || parentInstrument?.code,
+    symbol: rawSymbol || parentInstrument?.symbol,
+    provider: 'databento-future',
+    name: displayName,
+    displayName,
+    futureMeta,
+    supportsAdjustments: false
+  };
+}
+
+function buildDatabentoFutureMeta(parentInstrument, definition, fallbackDate = null) {
+  const root = getDatabentoFutureRoot(parentInstrument);
+  let year = toFiniteNumber(definition?.maturityYear);
+  let month = toFiniteNumber(definition?.maturityMonth);
+
+  if ((!Number.isFinite(year) || !Number.isFinite(month)) && definition?.expiration) {
+    const expirationDate = new Date(normalizeDatabentoTimestamp(definition.expiration));
+    if (Number.isFinite(expirationDate.getTime())) {
+      year = expirationDate.getUTCFullYear();
+      month = expirationDate.getUTCMonth() + 1;
+    }
+  }
+
+  if ((!Number.isFinite(year) || !Number.isFinite(month)) && definition?.rawSymbol) {
+    const inferred = inferDatabentoExpiryFromRawSymbol(definition.rawSymbol, fallbackDate);
+    year = inferred?.year ?? year;
+    month = inferred?.month ?? month;
+  }
+
+  const monthText = Number.isFinite(month) ? String(month).padStart(2, '0') : null;
+  return {
+    familyRoot: root,
+    familyKey: root ? `${parentInstrument?.countryCode}:${parentInstrument?.exchangeCode}:${root}` : null,
+    expiryKey: Number.isFinite(year) && monthText ? `${year}${monthText}` : null,
+    expiryLabel: Number.isFinite(year) && monthText ? `${String(year).slice(2)}${monthText}` : null,
+    expiryMonth: monthText,
+    isMainLike: false,
+    mainPattern: null
+  };
+}
+
+function inferDatabentoExpiryFromRawSymbol(rawSymbol, fallbackDate = null) {
+  const match = String(rawSymbol || '').trim().toUpperCase().match(/^([A-Z0-9]+?)([FGHJKMNQUVXZ])(\d)$/);
+  if (!match) return null;
+
+  const month = Number(FUTURE_MONTH_CODE_MAP[match[2]]);
+  const yearDigit = Number(match[3]);
+  if (!Number.isFinite(month) || !Number.isFinite(yearDigit)) return null;
+
+  const reference = fallbackDate ? new Date(`${normalizeDate(fallbackDate)}T00:00:00Z`) : new Date();
+  const referenceYear = Number.isFinite(reference.getTime()) ? reference.getUTCFullYear() : new Date().getUTCFullYear();
+  const referenceMonth = Number.isFinite(reference.getTime()) ? reference.getUTCMonth() + 1 : 1;
+  let year = Math.floor(referenceYear / 10) * 10 + yearDigit;
+
+  while (year < referenceYear || (year === referenceYear && month < referenceMonth)) {
+    year += 10;
+  }
+  while (year - referenceYear > 9) {
+    year -= 10;
+  }
+
+  return { year, month };
+}
+
+async function fetchDatabentoTimeseriesInChunks(params, options = {}) {
+  const chunks = buildDatabentoTimeChunks(params.start, params.end, params.schema);
+  if (chunks.length <= 1) {
+    return fetchDatabentoTimeseries(params, options);
+  }
+
+  const concurrency = getDatabentoChunkConcurrency(params.schema);
+  const chunkResults = await mapWithConcurrency(chunks, concurrency, async (chunk) =>
+    fetchDatabentoTimeseries({
+      ...params,
+      start: chunk.start,
+      end: chunk.end
+    }, options)
+  );
+
+  return chunkResults.flat().sort((left, right) => {
+    const leftTime = left?.hd?.ts_event || left?.ts_recv || '';
+    const rightTime = right?.hd?.ts_event || right?.ts_recv || '';
+    return String(leftTime).localeCompare(String(rightTime));
+  });
+}
+
+function buildDatabentoTimeChunks(start, end, schema) {
+  const startMs = Date.parse(normalizeDatabentoTimestamp(start));
+  const endMs = Date.parse(normalizeDatabentoTimestamp(end));
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return [{ start, end }];
+  }
+
+  const chunkDays = getDatabentoChunkDays(schema);
+  if (!chunkDays) return [{ start, end }];
+
+  const chunkMs = chunkDays * DAY_MS;
+  if (endMs - startMs <= chunkMs) {
+    return [{ start, end }];
+  }
+
+  const chunks = [];
+  let cursor = startMs;
+  while (cursor < endMs) {
+    const next = Math.min(endMs, cursor + chunkMs);
+    chunks.push({
+      start: new Date(cursor).toISOString(),
+      end: new Date(next).toISOString()
+    });
+    cursor = next;
+  }
+
+  return chunks;
+}
+
+function getDatabentoChunkDays(schema) {
+  if (schema === 'ohlcv-1m') return 31;
+  if (schema === 'ohlcv-1h') return 180;
+  if (schema === 'ohlcv-1d' || schema === 'definition') return 366;
+  return null;
+}
+
+function getDatabentoChunkConcurrency(schema) {
+  if (schema === 'ohlcv-1m') return 2;
+  if (schema === 'ohlcv-1h') return 3;
+  return 6;
+}
+
+async function fetchDatabentoTimeseries(params, { timeoutMs = 45_000, retries = 2 } = {}) {
+  if (!databentoKey) {
+    throw new Error('未配置 DATABENTO_API_KEY');
+  }
+
+  const bodyParams = {
+    encoding: 'json',
+    compression: 'none',
+    pretty_px: 'true',
+    pretty_ts: 'true',
+    map_symbols: 'true',
+    ...params
+  };
+
+  let lastError;
+  let adjustedForAvailableEnd = false;
+
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    const body = new URLSearchParams(bodyParams);
+    try {
+      const response = await fetch(new URL('/v0/timeseries.get_range', DATABENTO_HISTORICAL_URL), {
+        method: 'POST',
+        headers: {
+          accept: 'application/json,application/jsonl,text/plain,*/*',
+          authorization: `Basic ${Buffer.from(`${databentoKey}:`).toString('base64')}`,
+          'content-type': 'application/x-www-form-urlencoded',
+          'user-agent': 'stock-kline-dashboard/0.2'
+        },
+        body,
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+
+      const text = await response.text();
+      if (response.ok) {
+        return parseDatabentoJsonl(text);
+      }
+
+      const payload = tryParseJson(text);
+      const availableEnd = payload?.detail?.payload?.available_end;
+      if (!adjustedForAvailableEnd && availableEnd && bodyParams.end && Date.parse(normalizeDatabentoTimestamp(bodyParams.end)) > Date.parse(normalizeDatabentoTimestamp(availableEnd))) {
+        bodyParams.end = availableEnd;
+        adjustedForAvailableEnd = true;
+        attempt -= 1;
+        continue;
+      }
+
+      throw new Error(payload?.detail?.message || text.slice(0, 300) || `Databento HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+      if (attempt < retries - 1) {
+        await sleep(450 * (attempt + 1));
+      }
+    }
+  }
+
+  throw lastError || new Error('Databento 请求失败');
+}
+
+function parseDatabentoJsonl(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function tryParseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeDatabentoOhlcvRecords(records, { intraday }) {
+  const candles = (records || [])
+    .filter((row) => row?.hd?.rtype === 35 || row?.open !== undefined)
+    .map((row) => {
+      const timestamp = row?.hd?.ts_event || row?.ts_event || row?.ts_recv;
+      const timestampMs = parseDatabentoTimestampMs(timestamp);
+      return {
+        time: intraday ? Math.floor(timestampMs / 1000) : normalizeDate(timestamp),
+        open: toFiniteNumber(row.open),
+        high: toFiniteNumber(row.high),
+        low: toFiniteNumber(row.low),
+        close: toFiniteNumber(row.close),
+        volume: toFiniteNumber(row.volume),
+        databentoInstrumentId: toFiniteNumber(row?.hd?.instrument_id ?? row.instrument_id),
+        databentoSymbol: row.symbol || null
+      };
+    })
+    .filter(isValidCandle)
+    .sort((left, right) => compareChartTimes(left.time, right.time));
+
+  return dedupeDatabentoCandlesByTime(candles);
+}
+
+function dedupeDatabentoCandlesByTime(candles) {
+  const byTime = new Map();
+  for (const candle of candles || []) {
+    const existing = byTime.get(candle.time);
+    if (!existing || (toFiniteNumber(candle.volume) || 0) >= (toFiniteNumber(existing.volume) || 0)) {
+      byTime.set(candle.time, candle);
+    }
+  }
+  return [...byTime.values()].sort((left, right) => compareChartTimes(left.time, right.time));
+}
+
+function compareChartTimes(left, right) {
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  return String(left || '').localeCompare(String(right || ''));
+}
+
+function formatDatabentoDateTime(value) {
+  if (typeof value === 'string') {
+    return normalizeDatabentoTimestamp(value);
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
+}
+
+function normalizeDatabentoTimestamp(value) {
+  const text = String(value || '');
+  return text.replace(/\.(\d{3})\d+(Z)?$/, '.$1$2');
+}
+
+function parseDatabentoTimestampMs(value) {
+  const normalized = normalizeDatabentoTimestamp(value);
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : Date.now();
 }
 
 async function getTqSdkFutureFamilyContracts(instrument) {
@@ -1978,6 +2687,15 @@ async function getTqSdkFutureFamilyContracts(instrument) {
 }
 
 async function fetchCustomContinuousFutureCandles(instrument, interval) {
+  const upfrontWarnings = [];
+  if (isDatabentoUsFutureInstrument(instrument)) {
+    try {
+      return await fetchDatabentoContinuousFutureCandles(instrument, interval);
+    } catch (error) {
+      upfrontWarnings.push(`Databento ${instrument.code} 主连获取失败，暂回退原有期货接口：${error?.message || '未知错误'}`);
+    }
+  }
+
   const catalog = await getCatalog();
   const familyContracts = await getFutureFamilyContracts(catalog, instrument);
 
@@ -1986,6 +2704,7 @@ async function fetchCustomContinuousFutureCandles(instrument, interval) {
       candles: [],
       sourceName: `${instrument.name} 自定义主力连续`,
       warnings: [
+        ...upfrontWarnings,
         `${instrument.code} 未找到可拼接的季月合约，当前无法按你的规则生成主连。`
       ],
       rollovers: []
@@ -2045,7 +2764,7 @@ async function fetchCustomContinuousFutureCandles(instrument, interval) {
     }))
     .sort((left, right) => compareExpiryKeys(left.futureMeta?.expiryKey, right.futureMeta?.expiryKey));
 
-  const warnings = [];
+  const warnings = [...upfrontWarnings];
   for (const entry of dailyFetches) {
     if (entry.status === 'rejected') {
       warnings.push(`季月合约日K获取失败：${entry.reason?.message || '未知错误'}`);
@@ -2698,8 +3417,28 @@ function createTqSdkFutureAverageCacheKey(instrument, tradeDate) {
 
 async function fetchFutureMinuteSeriesForDate(instrument, tradeDate) {
   const marketTimeZone = getFutureMarketTimeZone(instrument);
-  const start = new Date(`${tradeDate}T00:00:00`);
-  const end = new Date(`${tradeDate}T23:59:59`);
+  const start = new Date(`${tradeDate}T00:00:00Z`);
+  const end = new Date(`${tradeDate}T23:59:59Z`);
+
+  if (isDatabentoUsFutureInstrument(instrument)) {
+    try {
+      const result = await fetchDatabentoFutureCandles(instrument, CHART_INTERVALS['1m'], {
+        startOverride: start,
+        endOverride: end,
+        timeoutMs: 20_000,
+        retries: 1
+      });
+      if (result.candles.length) {
+        return {
+          candles: result.candles,
+          source: 'databento-1m-average'
+        };
+      }
+    } catch {
+      // Fall through to the legacy futures intraday fallbacks.
+    }
+  }
+
   const candidates = [
     { type: 'day', source: 'miana-day-1m' },
     { type: '5min', source: 'miana-5min' },
