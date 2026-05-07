@@ -145,6 +145,7 @@ const STOCK_FINANCIAL_CHART_MODES = [
 ];
 const STOCK_FINANCIAL_STACK_KEYS = ['q1', 'q2', 'q3', 'q4'];
 const STOCK_FINANCIAL_STACK_COLORS = ['#94d17e', '#ffd260', '#ef676a', '#77c4e5'];
+const STOCK_FINANCIAL_TOOLTIP_TOTAL_COLOR = '#f2ef93';
 const STOCK_FINANCIAL_SINGLE_COLORS = {
   q1: '#94d17e',
   q2: '#ffd260',
@@ -944,29 +945,45 @@ function buildFinancialHoverInfo({ row, mode, title, quarterKey, x, y, value, gr
     label,
     amount,
     growth: row[quarterKey ? `${quarterKey}Gr` : mode.growthKey],
-    total: row.total,
-    q1: row.q1,
-    q2: row.q2,
-    q3: row.q3,
-    q4: row.q4
+    rows: buildFinancialTooltipRows(row)
   };
 }
 
 function StockFinancialTooltip({ info }) {
-  const left = clampNumber(info.x > 190 ? info.x - 162 : info.x + 12, 10, 170);
-  const top = clampNumber(info.y > 92 ? info.y - 80 : info.y + 10, 8, 70);
+  const left = clampNumber(info.x > 190 ? info.x - 198 : info.x + 12, 8, 136);
+  const top = clampNumber(info.y > 86 ? info.y - 124 : info.y + 10, 6, 36);
 
   return (
     <div className="stock-financial-tooltip" style={{ left, top }}>
-      <strong>{info.title} · {info.year} · {info.label}</strong>
-      <span>金额: {formatAmountWithYi(info.amount)}</span>
-      <span>同比: {formatDecimalPercent(info.growth)}</span>
-      <span>全年: {formatAmountWithYi(info.total)}</span>
-      <small>
-        Q1 {formatAmountWithYi(info.q1)} / Q2 {formatAmountWithYi(info.q2)} / Q3 {formatAmountWithYi(info.q3)} / Q4 {formatAmountWithYi(info.q4)}
-      </small>
+      {info.rows.map((row) => (
+        <div className="stock-financial-tooltip-row" key={row.key}>
+          <i style={{ background: row.color }} />
+          <span className="stock-financial-tooltip-label">{row.label}</span>
+          <b>{formatAmountWithYi(row.amount)}</b>
+          <em>{formatFinancialTooltipPercent(row.growth)}</em>
+        </div>
+      ))}
     </div>
   );
+}
+
+function buildFinancialTooltipRows(row) {
+  return [
+    {
+      key: 'total',
+      label: `${row.year}年`,
+      amount: row.total,
+      growth: row.gr,
+      color: STOCK_FINANCIAL_TOOLTIP_TOTAL_COLOR
+    },
+    ...STOCK_FINANCIAL_STACK_KEYS.map((key, index) => ({
+      key,
+      label: getFinancialQuarterTooltipLabel(key),
+      amount: row[key],
+      growth: row[`${key}Gr`],
+      color: STOCK_FINANCIAL_STACK_COLORS[index]
+    }))
+  ];
 }
 
 function getFinancialQuarterLabel(key) {
@@ -975,6 +992,14 @@ function getFinancialQuarterLabel(key) {
   if (key === 'q3') return '三季报';
   if (key === 'q4') return '四季报';
   return key;
+}
+
+function getFinancialQuarterTooltipLabel(key) {
+  if (key === 'q1') return '一季度';
+  if (key === 'q2') return '二季度';
+  if (key === 'q3') return '三季度';
+  if (key === 'q4') return '四季度';
+  return getFinancialQuarterLabel(key);
 }
 
 function formatCompactAmountTick(value) {
@@ -993,6 +1018,15 @@ function formatDecimalPercent(value) {
   const number = toFiniteNumber(value);
   if (!Number.isFinite(number)) return '--';
   return `${(number * 100).toFixed(2)}%`;
+}
+
+function formatFinancialTooltipPercent(value) {
+  const number = toFiniteNumber(value);
+  if (!Number.isFinite(number)) return '--';
+  const percent = number * 100;
+  const rounded = Math.abs(percent) >= 100 ? percent.toFixed(0) : percent.toFixed(1);
+  const text = rounded.replace(/\.0$/, '');
+  return `${percent > 0 ? '+' : ''}${text}%`;
 }
 
 function StockEditableCell({ item, column, onSaved }) {
