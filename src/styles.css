@@ -496,6 +496,83 @@ button {
   gap: 10px;
 }
 
+.compare-info-board {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.25fr) minmax(210px, 0.6fr) minmax(320px, 1.25fr);
+  align-items: stretch;
+  gap: 12px;
+}
+
+.compare-info-center {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.compare-side-info {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #d7dccf;
+  border-radius: 8px;
+  background: #fbfcf8;
+}
+
+.compare-side-info header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e4e8de;
+}
+
+.compare-side-info header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #223039;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-side-info header span {
+  flex: 0 0 auto;
+  color: #6b7374;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare-side-kline,
+.compare-side-fundamentals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+
+.compare-side-kline {
+  grid-template-columns: 1fr;
+}
+
+.compare-side-info .stock-info-item {
+  align-items: flex-start;
+  font-size: 12px;
+}
+
+.compare-side-fundamentals .stock-info-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px;
+}
+
+.compare-side-fundamentals .stock-info-item b {
+  white-space: nowrap;
+}
+
 .metric {
   min-height: 88px;
   padding: 13px 14px;
@@ -1727,6 +1804,14 @@ button {
   .status-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .compare-info-board {
+    grid-template-columns: 1fr;
+  }
+
+  .compare-info-center {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 900px) {
@@ -1788,6 +1873,12 @@ button {
   }
 
   .status-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .compare-info-center,
+  .compare-side-kline,
+  .compare-side-fundamentals {
     grid-template-columns: 1fr;
   }
 

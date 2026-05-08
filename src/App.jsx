@@ -1514,6 +1514,7 @@ function CompareDetailPage({
   const activeRawMove = getSeriesCandleMove(activeRaw, chartPayload?.series?.raw || [], {
     useAbsoluteBase: chartPayload?.instrument?.type === 'COMPARE'
   });
+  const activeInfoTime = activeSnapshot?.time || activeRaw?.time || activeLeft?.time || activeRight?.time || null;
   const allFavorites = useMemo(() => getAllCompareFavorites(compareFavorites), [compareFavorites]);
   const currentFavorite = useMemo(() => {
     if (!payload?.compare?.left || !payload?.compare?.right) return null;
@@ -1664,20 +1665,40 @@ function CompareDetailPage({
         onClear={() => setStrategyConfig(null)}
       />
 
-      <section className="status-strip">
-        <Metric
-          label="当前对比值"
-          value={formatQuotePrice(activeRaw?.close, chartPayload?.instrument?.type)}
-          change={activeRawMove.changeRate}
+      <section className="compare-info-board">
+        <CompareSideInfoCard
+          side="left"
+          title={leftComponent?.displayName || '左侧'}
+          component={leftComponent}
+          instrumentType={chartPayload?.compare?.left?.type}
+          activeTime={activeInfoTime}
+          activeCandle={activeLeft}
         />
-        <Metric label="涨跌额" value={formatSigned(activeRawMove.change)} />
-        <Metric
-          label={leftComponent?.displayName || '左侧'}
-          value={formatQuotePrice(activeLeft?.close, chartPayload?.compare?.left?.type)}
-        />
-        <Metric
-          label={rightComponent?.displayName || '右侧'}
-          value={formatQuotePrice(activeRight?.close, chartPayload?.compare?.right?.type)}
+        <div className="compare-info-center">
+          <Metric
+            label="当前对比值"
+            value={formatQuotePrice(activeRaw?.close, chartPayload?.instrument?.type)}
+            change={activeRawMove.changeRate}
+          />
+          <Metric label="涨跌额" value={formatSigned(activeRawMove.change)} />
+          <Metric
+            label={leftComponent?.displayName || '左侧'}
+            value={formatQuotePrice(activeLeft?.close, chartPayload?.compare?.left?.type)}
+            small
+          />
+          <Metric
+            label={rightComponent?.displayName || '右侧'}
+            value={formatQuotePrice(activeRight?.close, chartPayload?.compare?.right?.type)}
+            small
+          />
+        </div>
+        <CompareSideInfoCard
+          side="right"
+          title={rightComponent?.displayName || '右侧'}
+          component={rightComponent}
+          instrumentType={chartPayload?.compare?.right?.type}
+          activeTime={activeInfoTime}
+          activeCandle={activeRight}
         />
       </section>
 
@@ -3516,6 +3537,71 @@ function Metric({ label, value, change, small = false }) {
   );
 }
 
+function CompareSideInfoCard({ title, component, instrumentType, activeTime, activeCandle, side }) {
+  const snapshot = getCompareComponentDetailSnapshot(component, activeTime, activeCandle);
+  const fundamentalRow = getFundamentalRow(component?.fundamentals?.rows, snapshot.time);
+
+  return (
+    <article className={`compare-side-info ${side === 'right' ? 'is-right' : 'is-left'}`}>
+      <header>
+        <strong>{title}</strong>
+        <span>{snapshot.time ? formatTime(snapshot.time) : '--'}</span>
+      </header>
+      <div className="compare-side-kline">
+        <StockSnapshotText label="普通" candle={snapshot.raw} instrumentType={instrumentType} />
+        <StockSnapshotText label="前" candle={snapshot.qfq} instrumentType={instrumentType} />
+        <StockSnapshotText label="后" candle={snapshot.hfq} instrumentType={instrumentType} />
+      </div>
+      <StockFundamentalSummary row={fundamentalRow} instrumentType={instrumentType} />
+    </article>
+  );
+}
+
+function getCompareComponentDetailSnapshot(component, activeTime, activeCandle) {
+  const time =
+    activeTime ||
+    activeCandle?.time ||
+    component?.candles?.at(-1)?.time ||
+    component?.rawCandles?.at(-1)?.time ||
+    component?.qfq?.at(-1)?.time ||
+    component?.hfq?.at(-1)?.time ||
+    null;
+
+  return {
+    time,
+    raw: findCandleByTime(component?.rawCandles || component?.candles || [], time) || activeCandle || null,
+    qfq: findCandleByTime(component?.qfq || [], time),
+    hfq: findCandleByTime(component?.hfq || [], time)
+  };
+}
+
+function findCandleByTime(candles, time) {
+  if (!Array.isArray(candles) || !candles.length) return null;
+  if (!time) return candles.at(-1) || null;
+  return candles.find((candle) => String(candle.time) === String(time)) || null;
+}
+
+function StockFundamentalSummary({ row, instrumentType }) {
+  return (
+    <div className="compare-side-fundamentals">
+      <SummaryToken label="总股本" value={formatShareCapital(row?.totalShares)} />
+      <SummaryToken label="价格" value={formatQuotePrice(row?.price, instrumentType)} />
+      <SummaryToken label="总市值" value={formatAmountWithYi(row?.marketCap)} />
+      <SummaryToken label="前4个季度利润" value={formatAmountWithYi(row?.ttmProfit)} />
+      <SummaryToken label="市盈率" value={formatMetricValue(row?.peRatio, 'ratio')} />
+      <SummaryToken label="前4个季度营业收入" value={formatAmountWithYi(row?.ttmRevenue)} />
+      <SummaryToken label="净资产" value={formatAmountWithYi(row?.netAssets)} />
+      <SummaryToken label="资产回报率" value={formatMetricValue(row?.returnOnAssets, 'percent')} />
+      <SummaryToken label="市值回报率" value={formatMetricValue(row?.marketCapReturnRate, 'percent')} />
+      <SummaryToken label="收入增长率" value={formatMetricValue(row?.revenueGrowthRate, 'percent')} />
+      <SummaryToken label="利润增长率" value={formatMetricValue(row?.profitGrowthRate, 'percent')} />
+      <SummaryToken label="股息率" value={formatMetricValue(row?.dividendYield, 'percent')} />
+      <SummaryToken label="市净率" value={formatMetricValue(row?.pbRatio, 'ratio')} />
+      <SummaryToken label="利润率" value={formatMetricValue(row?.profitMargin, 'percent')} />
+    </div>
+  );
+}
+
 function StockSnapshotText({ label, candle, instrumentType }) {
   if (!candle) {
     return (
@@ -4095,6 +4181,20 @@ function buildCompareAdjustmentPayload(payload, adjustmentMode, options = {}) {
 
   const scaledLeftCandles = multiplyCandles(leftCandles, leftMultiplier);
   const scaledRightCandles = multiplyCandles(rightCandles, rightMultiplier);
+  const scaledLeftRawCandles = multiplyCandles(leftRawCandles, leftMultiplier);
+  const scaledRightRawCandles = multiplyCandles(rightRawCandles, rightMultiplier);
+  const scaledLeftQfqCandles = normalizedMode === 'qfq'
+    ? scaledLeftCandles
+    : multiplyCandles(leftComponent.qfq || [], leftMultiplier);
+  const scaledRightQfqCandles = normalizedMode === 'qfq'
+    ? scaledRightCandles
+    : multiplyCandles(rightComponent.qfq || [], rightMultiplier);
+  const scaledLeftHfqCandles = normalizedMode === 'hfq'
+    ? scaledLeftCandles
+    : multiplyCandles(leftComponent.hfq || [], leftMultiplier);
+  const scaledRightHfqCandles = normalizedMode === 'hfq'
+    ? scaledRightCandles
+    : multiplyCandles(rightComponent.hfq || [], rightMultiplier);
   const compareCandles = buildClientSyntheticComparisonCandles(scaledLeftCandles, scaledRightCandles, payload.compare.mode, syntheticMode);
   if (!compareCandles.length) {
     return payload;
@@ -4104,14 +4204,18 @@ function buildCompareAdjustmentPayload(payload, adjustmentMode, options = {}) {
     {
       ...leftComponent,
       displayName: withMultiplierDisplayName(leftComponent.displayName || leftComponent.label, leftMultiplier),
-      rawCandles: leftRawCandles,
-      candles: syntheticMode === 'minuteDailyCandles' ? aggregateClientCandlesByDate(scaledLeftCandles) : scaledLeftCandles
+      rawCandles: scaledLeftRawCandles,
+      candles: syntheticMode === 'minuteDailyCandles' ? aggregateClientCandlesByDate(scaledLeftCandles) : scaledLeftCandles,
+      qfq: scaledLeftQfqCandles,
+      hfq: scaledLeftHfqCandles
     },
     {
       ...rightComponent,
       displayName: withMultiplierDisplayName(rightComponent.displayName || rightComponent.label, rightMultiplier),
-      rawCandles: rightRawCandles,
-      candles: syntheticMode === 'minuteDailyCandles' ? aggregateClientCandlesByDate(scaledRightCandles) : scaledRightCandles
+      rawCandles: scaledRightRawCandles,
+      candles: syntheticMode === 'minuteDailyCandles' ? aggregateClientCandlesByDate(scaledRightCandles) : scaledRightCandles,
+      qfq: scaledRightQfqCandles,
+      hfq: scaledRightHfqCandles
     }
   ];
   const interval = syntheticMode === 'minuteDailyCandles'

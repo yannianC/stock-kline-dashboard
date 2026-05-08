@@ -3702,7 +3702,7 @@ async function buildCompareDetail(leftInstrument, rightInstrument, mode, interva
 
 async function getCachedCompareDetail(leftInstrument, rightInstrument, mode, interval, { forceRefresh = false } = {}) {
   const intervalCacheKey = interval.cacheKey || interval.key;
-  const cacheKey = `${leftInstrument.id}::${rightInstrument.id}::${mode}::${intervalCacheKey}`;
+  const cacheKey = `${leftInstrument.id}::${rightInstrument.id}::${mode}::${intervalCacheKey}::component-fundamentals-v1`;
   const shouldPersistDiskCache = !(interval.key === '1m' && Number(interval.stockLookbackDays || 0) > 400);
   return getOrLoadResponseCache(
     compareDetailCache,
@@ -3745,6 +3745,11 @@ async function buildSyntheticComparisonSeries(leftInstrument, rightInstrument, m
     ...leftAdjustment.warnings,
     ...rightAdjustment.warnings
   ];
+  const [leftFundamentals, rightFundamentals] = await Promise.all([
+    buildCompareComponentFundamentals(leftInstrument, leftResult.candles || [], interval),
+    buildCompareComponentFundamentals(rightInstrument, rightResult.candles || [], interval)
+  ]);
+  warnings.push(...leftFundamentals.warnings, ...rightFundamentals.warnings);
 
   if (compareCandles.length < leftResult.candles.length || compareCandles.length < alignedRightCandles.length) {
     warnings.push(`${labels.alignmentLabel} 主对比线按共同时间区间计算：左侧全历史 ${leftResult.candles.length} 根，右侧全历史 ${rightResult.candles.length} 根，结果 ${compareCandles.length} 根。`);
@@ -3765,7 +3770,8 @@ async function buildSyntheticComparisonSeries(leftInstrument, rightInstrument, m
         sourceName: leftResult.sourceName,
         candles: leftResult.candles || [],
         qfq: leftAdjustment.qfq,
-        hfq: leftAdjustment.hfq
+        hfq: leftAdjustment.hfq,
+        fundamentals: leftFundamentals.data
       },
       {
         key: 'right',
@@ -3774,11 +3780,47 @@ async function buildSyntheticComparisonSeries(leftInstrument, rightInstrument, m
         sourceName: rightResult.sourceName,
         candles: rightResult.candles || [],
         qfq: rightAdjustment.qfq,
-        hfq: rightAdjustment.hfq
+        hfq: rightAdjustment.hfq,
+        fundamentals: rightFundamentals.data
       }
     ],
     warnings
   };
+}
+
+async function buildCompareComponentFundamentals(instrument, candles, interval) {
+  if (instrument?.type !== 'STOCK' || interval?.intraday || !candles?.length) {
+    return {
+      data: {
+        current: null,
+        rows: [],
+        metrics: []
+      },
+      warnings: []
+    };
+  }
+
+  try {
+    const latestQuote = (await enrichWithQuotes([instrument]))?.[0]?.quote || buildQuoteFromCandles(candles);
+    const result = await buildStockFundamentals(instrument, candles, latestQuote);
+    return {
+      data: {
+        current: result.current,
+        rows: result.rows,
+        metrics: result.metrics
+      },
+      warnings: (result.warnings || []).map((warning) => `${instrument.code} 财务：${warning}`)
+    };
+  } catch (error) {
+    return {
+      data: {
+        current: null,
+        rows: [],
+        metrics: STOCK_FUNDAMENTAL_METRICS
+      },
+      warnings: [`${instrument.code} 财务指标计算失败：${error.message}`]
+    };
+  }
 }
 
 async function buildCompareComponentAdjustedSeries(instrument, candles, rollovers, interval = null) {
