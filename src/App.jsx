@@ -616,7 +616,7 @@ function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSa
 
   useEffect(() => {
     const missingCodes = items
-      .filter((item) => item?.tickerSymbol && !item.financialCharts && !chartMap[item.tickerSymbol])
+      .filter((item) => item?.tickerSymbol && !chartMap[item.tickerSymbol] && !hasRichFinancialCharts(item.financialCharts))
       .map((item) => item.tickerSymbol);
     if (!missingCodes.length) return;
 
@@ -687,6 +687,12 @@ function StockTable({ items, sort, onSort, onOpenDetail, onOpenCompare, onCellSa
       </tbody>
     </table>
   );
+}
+
+function hasRichFinancialCharts(charts) {
+  const revenueCount = Array.isArray(charts?.revenue) ? charts.revenue.length : 0;
+  const profitCount = Array.isArray(charts?.profit) ? charts.profit.length : 0;
+  return Math.max(revenueCount, profitCount) >= 6;
 }
 
 function renderStockTableCell({ item, column, onOpenDetail, onOpenCompare, onCellSaved, chartLoading = false }) {

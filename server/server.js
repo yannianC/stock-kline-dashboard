@@ -30,6 +30,7 @@ const STOCK_Q1_RANGE_END = '002902';
 const CATALOG_DISK_CACHE_PATH = new URL('./catalog-cache.json', import.meta.url);
 const STOCK_Q1_DISK_CACHE_PATH = new URL('./stock-q1-cache.json', import.meta.url);
 const STOCK_TABLE_OVERRIDES_PATH = new URL('./stock-table-overrides.json', import.meta.url);
+const A_SHARE_LATEST_SNAPSHOT_PATH = new URL('./a-share-latest-snapshot.json', import.meta.url);
 const RESPONSE_DISK_CACHE_DIR_PATH = new URL('./response-cache/', import.meta.url);
 const TQSDK_BRIDGE_PATH = fileURLToPath(new URL('./tqsdk_bridge.py', import.meta.url));
 const QUOTE_BATCH_SIZE = 20;
@@ -159,6 +160,10 @@ const stockQ1SnapshotCache = {
   data: null,
   promise: null
 };
+const aShareLatestSnapshotCache = {
+  mtimeMs: 0,
+  data: null
+};
 
 const distributionCache = new Map();
 const dailyHistoryCache = new Map();
@@ -270,13 +275,18 @@ app.get('/api/stock-table', async (req, res) => {
     const filters = parseStockTableFilters(req.query.filters);
     const catalog = await getCatalog();
     const forceRefresh = String(req.query.force || '') === '1';
-    const q1Snapshot = await getStockQ1Snapshot({ catalog, forceRefresh }).catch(() => null);
+    const importedSnapshot = readAShareLatestSnapshot();
+    const q1SnapshotPromise = getStockQ1Snapshot({ catalog, forceRefresh });
+    const q1Snapshot = importedSnapshot
+      ? await withTimeout(q1SnapshotPromise, forceRefresh ? 15000 : 5000).catch(() => null)
+      : await q1SnapshotPromise.catch(() => null);
     const dailyBasicSnapshot = await withTimeout(getTushareDailyBasicSnapshot(), 5000).catch(() => null);
     const overrides = readStockTableOverrides();
     const rows = buildStockTableRows({
       catalog,
       q1Snapshot,
       dailyBasicSnapshot,
+      importedSnapshot,
       overrides
     });
 
@@ -295,7 +305,8 @@ app.get('/api/stock-table', async (req, res) => {
       listTypes: LIST_TYPES,
       filters: {
         stockTable: filters,
-        q1Snapshot: buildQ1SnapshotMeta(q1Snapshot)
+        q1Snapshot: buildQ1SnapshotMeta(q1Snapshot),
+        importedSnapshot: buildImportedSnapshotMeta(importedSnapshot)
       },
       sort: {
         field: sortField,
@@ -320,6 +331,7 @@ app.get('/api/stock-financial-charts', async (req, res) => {
       .slice(0, 80);
     const catalog = await getCatalog();
     const q1Snapshot = await getStockQ1Snapshot({ catalog }).catch(() => null);
+    const importedSnapshot = readAShareLatestSnapshot();
     const instrumentsByCode = new Map(
       (catalog || [])
         .filter((item) => item.type === 'STOCK')
@@ -327,13 +339,14 @@ app.get('/api/stock-financial-charts', async (req, res) => {
     );
 
     const pairs = await mapWithConcurrency(codes, 4, async (code) => {
+      const importedCharts = importedSnapshot?.items?.[code]?.revenueProfit?.financialCharts || null;
       const cached = q1Snapshot?.items?.[code]?.financialCharts;
       if (cached?.revenue?.length || cached?.profit?.length) {
-        return [code, cached];
+        return [code, mergeStockFinancialCharts(cached, importedCharts)];
       }
 
       const instrument = instrumentsByCode.get(code);
-      if (!instrument) return [code, null];
+      if (!instrument) return [code, importedCharts];
 
       try {
         const charts = await withTimeout(
@@ -343,9 +356,9 @@ app.get('/api/stock-financial-charts', async (req, res) => {
           })),
           18000
         );
-        return [code, charts];
+        return [code, mergeStockFinancialCharts(charts, importedCharts)];
       } catch (_error) {
-        return [code, null];
+        return [code, importedCharts];
       }
     });
 
@@ -6510,6 +6523,38 @@ function persistStockTableOverrides(overrides) {
   fs.writeFileSync(STOCK_TABLE_OVERRIDES_PATH, JSON.stringify(overrides || {}, null, 2), 'utf8');
 }
 
+function readAShareLatestSnapshot() {
+  try {
+    if (!fs.existsSync(A_SHARE_LATEST_SNAPSHOT_PATH)) return null;
+    const stat = fs.statSync(A_SHARE_LATEST_SNAPSHOT_PATH);
+    if (aShareLatestSnapshotCache.data && aShareLatestSnapshotCache.mtimeMs === stat.mtimeMs) {
+      return aShareLatestSnapshotCache.data;
+    }
+
+    const parsed = JSON.parse(fs.readFileSync(A_SHARE_LATEST_SNAPSHOT_PATH, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || !parsed.items || typeof parsed.items !== 'object') {
+      return null;
+    }
+
+    aShareLatestSnapshotCache.mtimeMs = stat.mtimeMs;
+    aShareLatestSnapshotCache.data = parsed;
+    return parsed;
+  } catch (error) {
+    console.warn('[a-share-import] read latest snapshot failed', error?.message || error);
+    return null;
+  }
+}
+
+function buildImportedSnapshotMeta(snapshot) {
+  if (!snapshot?.meta) return null;
+  return {
+    sourceFile: snapshot.meta.sourceFile || null,
+    importedAt: snapshot.meta.importedAt || null,
+    itemCount: snapshot.meta.itemCount || Object.keys(snapshot.items || {}).length,
+    changedItemCount: snapshot.meta.changedItemCount ?? null
+  };
+}
+
 function normalizeStockTableEditValue(field, value) {
   if (['note1', 'note2', 'targetPrice1', 'targetPrice2'].includes(field)) {
     return value == null ? '' : String(value);
@@ -6518,64 +6563,87 @@ function normalizeStockTableEditValue(field, value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function buildStockTableRows({ catalog, q1Snapshot, dailyBasicSnapshot, overrides }) {
+function buildStockTableRows({ catalog, q1Snapshot, dailyBasicSnapshot, importedSnapshot, overrides }) {
   return (catalog || [])
     .filter(isStockQ1TargetInstrument)
     .map((instrument) => buildStockTableRow(instrument, {
       q1Row: q1Snapshot?.items?.[instrument.code] || null,
       dailyBasicRow: getDailyBasicRowForInstrument(dailyBasicSnapshot, instrument),
+      importedRow: importedSnapshot?.items?.[instrument.code] || null,
       override: getStockTableOverride(overrides, instrument)
     }))
     .filter(Boolean);
 }
 
-function buildStockTableRow(instrument, { q1Row, dailyBasicRow, override }) {
-  const peRatioTtm = firstFiniteNumber(q1Row?.peTtm, dailyBasicRow?.peTtm);
-  const stockPrice = firstFiniteNumber(q1Row?.price, dailyBasicRow?.close);
-  const marketCap = firstFiniteNumber(q1Row?.marketValue, dailyBasicRow?.totalMarketValue);
-  const forecastRevenueGrowthRate = firstFiniteNumber(q1Row?.revenueGrowthRate);
-  const forecastProfitGrowthRate = firstFiniteNumber(q1Row?.profitGrowthRate);
+function buildStockTableRow(instrument, { q1Row, dailyBasicRow, importedRow, override }) {
+  const importedBasic = importedRow?.basic || null;
+  const importedRevenueProfit = importedRow?.revenueProfit || null;
+  const peRatioTtm = firstFiniteNumber(importedBasic?.peRatio, q1Row?.peTtm, dailyBasicRow?.peTtm);
+  const stockPrice = firstFiniteNumber(importedBasic?.price, q1Row?.price, dailyBasicRow?.close);
+  const marketCap = firstFiniteNumber(importedBasic?.marketCap, q1Row?.marketValue, dailyBasicRow?.totalMarketValue);
+  const forecastRevenueGrowthRate = firstFiniteNumber(importedRevenueProfit?.revenueGrowthRate, q1Row?.revenueGrowthRate);
+  const forecastProfitGrowthRate = firstFiniteNumber(importedRevenueProfit?.profitGrowthRate, q1Row?.profitGrowthRate);
   const forecastPe3Years = calculateStockTableForecastPe(peRatioTtm, forecastRevenueGrowthRate, forecastProfitGrowthRate);
+  const financialCharts = mergeStockFinancialCharts(q1Row?.financialCharts, importedRevenueProfit?.financialCharts);
 
   return {
     ...instrument,
     tickerSymbol: instrument.code,
-    tickerName: instrument.name,
-    industryCategory: instrument.industryCategory || instrument.industry || '',
+    tickerName: importedRow?.name || instrument.name,
+    industryCategory: importedBasic?.industryCategory || instrument.industryCategory || instrument.industry || '',
     performanceGrowthScore: toNullableNumber(override?.performanceGrowthScore),
     overallScore: toNullableNumber(override?.overallScore),
     liudaScore: toNullableNumber(override?.liudaScore),
     marketCap: roundMetricValue(marketCap),
     stockPrice: roundMetricValue(stockPrice),
-    grossRevenue: roundMetricValue(q1Row?.revenue),
-    netProfit: roundMetricValue(q1Row?.profit),
-    financialCharts: q1Row?.financialCharts || null,
+    grossRevenue: roundMetricValue(firstFiniteNumber(importedRevenueProfit?.revenue, q1Row?.revenue)),
+    netProfit: roundMetricValue(firstFiniteNumber(importedRevenueProfit?.profit, q1Row?.profit)),
+    financialCharts,
     peRatioTtm: roundMetricValue(peRatioTtm),
-    pbRatio: roundMetricValue(dailyBasicRow?.pb),
-    dividendYield2026: normalizeDailyBasicDividendRate(dailyBasicRow?.dvTtm),
+    pbRatio: roundMetricValue(firstFiniteNumber(importedBasic?.pbRatio, dailyBasicRow?.pb)),
+    dividendYield2026: firstFiniteNumber(importedBasic?.dividendYieldTrailing12m, normalizeDailyBasicDividendRate(dailyBasicRow?.dvTtm)),
     dividendYield2025: normalizeDailyBasicDividendRate(dailyBasicRow?.dvRatio),
     forecastRevenueGrowthRate: roundMetricValue(forecastRevenueGrowthRate),
     forecastProfitGrowthRate: roundMetricValue(forecastProfitGrowthRate),
     forecastPe3Years: roundMetricValue(forecastPe3Years),
     annualPriceChange: null,
-    revGrowthRateNew: roundMetricValue(q1Row?.revenueGrowthRate),
-    profitGrowthRateNew: roundMetricValue(q1Row?.profitGrowthRate),
+    revGrowthRateNew: roundMetricValue(firstFiniteNumber(importedRevenueProfit?.revenueGrowthRate, q1Row?.revenueGrowthRate)),
+    profitGrowthRateNew: roundMetricValue(firstFiniteNumber(importedRevenueProfit?.profitGrowthRate, q1Row?.profitGrowthRate)),
     peForecastNew: roundMetricValue(forecastPe3Years),
     targetPrice1: override?.targetPrice1 || '',
     targetPrice2: override?.targetPrice2 || '',
     note1: override?.note1 || '',
     note2: override?.note2 || '',
-    reportDate: q1Row?.reportDate || null,
-    quoteDate: q1Row?.quoteDate || dailyBasicRow?.tradeDate || null,
-    q1Source: q1Row?.source || null,
+    reportDate: importedRevenueProfit?.reportDate || q1Row?.reportDate || null,
+    quoteDate: importedBasic?.priceDate || q1Row?.quoteDate || dailyBasicRow?.tradeDate || null,
+    q1Source: importedRow ? 'xlsx' : q1Row?.source || null,
     quote: {
       price: roundMetricValue(stockPrice),
       change: null,
       changeRate: null,
-      date: q1Row?.quoteDate || dailyBasicRow?.tradeDate || null,
+      date: importedBasic?.priceDate || q1Row?.quoteDate || dailyBasicRow?.tradeDate || null,
       instrumentType: 'STOCK'
     }
   };
+}
+
+function mergeStockFinancialCharts(baseCharts, importedCharts) {
+  if (!baseCharts && !importedCharts) return null;
+  return {
+    revenue: mergeStockFinancialChartRows(baseCharts?.revenue, importedCharts?.revenue),
+    profit: mergeStockFinancialChartRows(baseCharts?.profit, importedCharts?.profit)
+  };
+}
+
+function mergeStockFinancialChartRows(baseRows, importedRows) {
+  const rowsByYear = new Map();
+  for (const row of baseRows || []) {
+    if (row?.year) rowsByYear.set(String(row.year), row);
+  }
+  for (const row of importedRows || []) {
+    if (row?.year) rowsByYear.set(String(row.year), row);
+  }
+  return [...rowsByYear.values()].sort((left, right) => String(left.year).localeCompare(String(right.year)));
 }
 
 async function enrichStockTableFinancialCharts(items) {

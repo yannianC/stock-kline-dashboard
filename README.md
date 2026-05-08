@@ -29,6 +29,16 @@ npm run dev
 
 API 健康检查：http://localhost:8787/api/health
 
+## 导入 A 股最新财务表
+
+以后收到同格式的 i问财 xlsx 后，直接运行：
+
+```bash
+npm run import:a-share -- "/path/to/A股最新数据（2026年5月）.xlsx"
+```
+
+脚本会生成 `server/a-share-latest-snapshot.json`。这个文件是本地运行数据，不提交到 Git；股票增强列表会优先用它补充最新的价格、市值、行业、PE/PB、股息率、营收、净利润、增长率和财务小图表最新季度。
+
 ## 环境变量
 
 复制 `.env.example` 到 `.env` 后按需填写：
