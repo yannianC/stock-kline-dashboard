@@ -6564,15 +6564,36 @@ function normalizeStockTableEditValue(field, value) {
 }
 
 function buildStockTableRows({ catalog, q1Snapshot, dailyBasicSnapshot, importedSnapshot, overrides }) {
-  return (catalog || [])
-    .filter(isStockQ1TargetInstrument)
-    .map((instrument) => buildStockTableRow(instrument, {
+  const rowsByCode = new Map();
+  const stockInstruments = (catalog || []).filter(isStockTableInstrument);
+
+  for (const instrument of stockInstruments) {
+    const row = buildStockTableRow(instrument, {
       q1Row: q1Snapshot?.items?.[instrument.code] || null,
       dailyBasicRow: getDailyBasicRowForInstrument(dailyBasicSnapshot, instrument),
       importedRow: importedSnapshot?.items?.[instrument.code] || null,
       override: getStockTableOverride(overrides, instrument)
-    }))
-    .filter(Boolean);
+    });
+    if (row?.tickerSymbol) {
+      rowsByCode.set(row.tickerSymbol, row);
+    }
+  }
+
+  for (const importedRow of Object.values(importedSnapshot?.items || {})) {
+    if (!importedRow?.code || rowsByCode.has(importedRow.code)) continue;
+    const instrument = buildImportedStockTableInstrument(importedRow);
+    const row = buildStockTableRow(instrument, {
+      q1Row: q1Snapshot?.items?.[instrument.code] || null,
+      dailyBasicRow: getDailyBasicRowForInstrument(dailyBasicSnapshot, instrument),
+      importedRow,
+      override: getStockTableOverride(overrides, instrument)
+    });
+    if (row?.tickerSymbol) {
+      rowsByCode.set(row.tickerSymbol, row);
+    }
+  }
+
+  return [...rowsByCode.values()];
 }
 
 function buildStockTableRow(instrument, { q1Row, dailyBasicRow, importedRow, override }) {
@@ -6698,6 +6719,41 @@ function normalizeDailyBasicDividendRate(value) {
   const number = toFiniteNumber(value);
   if (!Number.isFinite(number)) return null;
   return Math.abs(number) > 1 ? roundMetricValue(number / 100) : roundMetricValue(number);
+}
+
+function isStockTableInstrument(instrument) {
+  return Boolean(
+    instrument?.type === 'STOCK' &&
+    instrument?.countryCode === 'CHN' &&
+    typeof instrument.code === 'string' &&
+    instrument.code
+  );
+}
+
+function buildImportedStockTableInstrument(importedRow) {
+  const code = String(importedRow?.code || '').padStart(6, '0');
+  const exchange = String(importedRow?.exchange || inferAshareExchangeFromCode(code)).toUpperCase();
+  const symbol = importedRow?.symbol || `${exchange === 'SH' ? 'sh' : exchange === 'BJ' ? 'bj' : 'sz'}${code}`;
+  return {
+    id: `STOCK:${symbol}`,
+    type: 'STOCK',
+    typeLabel: '股票',
+    code,
+    symbol,
+    name: importedRow?.name || code,
+    chineseName: importedRow?.name || '',
+    countryCode: 'CHN',
+    marketLabel: 'A股',
+    exchangeCode: exchange === 'SH' ? 'XSHG' : exchange === 'BJ' ? 'BSE' : 'XSHE',
+    industryCategory: importedRow?.basic?.industryCategory || '',
+    searchText: [code, symbol, importedRow?.name, importedRow?.basic?.industryCategory].filter(Boolean).join(' ')
+  };
+}
+
+function inferAshareExchangeFromCode(code) {
+  if (/^(5|6|9)/.test(String(code || ''))) return 'SH';
+  if (/^(4|8)/.test(String(code || ''))) return 'BJ';
+  return 'SZ';
 }
 
 function calculateStockTableForecastPe(peRatioTtm, revenueGrowthRate, profitGrowthRate) {
